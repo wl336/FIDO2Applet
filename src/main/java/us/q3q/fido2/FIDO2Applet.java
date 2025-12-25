@@ -96,6 +96,14 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
      */
     private static final short IV_LEN = 16;
     /**
+     * Byte length of one EC point for the platform/authenticator DH channel (always P-256)
+     */
+    private static final short KEY_AGREEMENT_POINT_LENGTH = 32;
+    /**
+     * Byte length of the uncompressed platform/authenticator DH public key
+     */
+    private static final short KEY_AGREEMENT_PUB_KEY_LENGTH = (short) (2 * KEY_AGREEMENT_POINT_LENGTH + 1);
+    /**
      * How long an RP identifier is allowed to be for a resident key. Values longer than this are truncated.
      * The CTAP2.1 standard says the minimum value for this is 32.
      */
@@ -137,9 +145,13 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
      */
     private static final short MAX_FRAGMENT_LEN = 960;
     /**
+     * Curve-specific parameters used for credential operations
+     */
+    private final CurveParameters curveParameters;
+    /**
      * Byte length of one EC point
      */
-    private static final short KEY_POINT_LENGTH = 32;
+    private final short KEY_POINT_LENGTH;
     /**
      * Byte length of hashed relying party ID
      */
@@ -147,7 +159,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
     /**
      * Byte length of "payload" part of the FIDO2 Credential ID struct, excluding verification and wrapping
      */
-    private static final short CREDENTIAL_PAYLOAD_LEN = (short)(RP_HASH_LEN + KEY_POINT_LENGTH + 16);
+    private final short CREDENTIAL_PAYLOAD_LEN;
     /**
      * Total byte length of output FIDO2 Credential ID struct.
      * Many authenticators use 64, so ideally we would want to use 64 as well so creds that come from this authenticator
@@ -157,11 +169,11 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
      * ID hashes (which are 32-byte SHA256es). In order to reduce this to 32 you would need to deterministically derive
      * the credential private key from the RP and User IDs instead of storing it inside the credential.
      */
-    private static final short CREDENTIAL_ID_LEN = (short)(CREDENTIAL_PAYLOAD_LEN + IV_LEN + 16);
+    private final short CREDENTIAL_ID_LEN;
     /**
      * Byte length of an uncompressed EC public key
      */
-    private static final short PUB_KEY_LENGTH = (short)(2 * KEY_POINT_LENGTH + 1);
+    private final short PUB_KEY_LENGTH;
     /**
      * Byte length of hashed client data struct
      */
@@ -626,18 +638,19 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         }
 
         // We only support one algorithm, so let's find that one.
-        boolean foundES256 = false;
+        boolean foundSupportedAlg = false;
         final short numPubKeys = (short)(pubKeyCredParamsType & 0x0F);
         for (short i = 0; i < numPubKeys; i++) {
             readIdx = checkIfPubKeyBlockSupported(apdu, buffer, readIdx, lc);
-            if (transientStorage.getStoredLen() != -1) {
-                foundES256 = true;
+            if (transientStorage.getStoredLen() != -1
+                    && transientStorage.getStoredIdx() == curveParameters.getCoseAlgId()) {
+                foundSupportedAlg = true;
                 // cannot break here because we need to check for any
                 // invalid pubKeyCredParams entries that come later...
             }
         }
 
-        if (!foundES256) {
+        if (!foundSupportedAlg) {
             sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_UNSUPPORTED_ALGORITHM);
         }
 
@@ -932,13 +945,13 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         // Done getting params - make a keypair. You know, what we're supposed to do in this function?
         // Well, we're getting to it, only 150 lines in.
         // We sometimes reset the private key, which clears its curve data, so reset that here
-        P256Constants.setCurve((ECPrivateKey) ecKeyPair.getPrivate());
+        curveParameters.applyTo((ECPrivateKey) ecKeyPair.getPrivate());
 
         final short scratchPublicKeyHandle = bufferManager.allocate(apdu, PUB_KEY_LENGTH, BufferManager.ANYWHERE);
         final short scratchPublicKeyOffset = bufferManager.getOffsetForHandle(scratchPublicKeyHandle);
         final byte[] scratchPublicKeyBuffer = bufferManager.getBufferForHandle(apdu, scratchPublicKeyHandle);
 
-        if (!makeGoodKeyPair(ecKeyPair, scratchPublicKeyBuffer, scratchPublicKeyOffset)) {
+        if (!makeGoodKeyPair(ecKeyPair, scratchPublicKeyBuffer, scratchPublicKeyOffset, KEY_POINT_LENGTH, PUB_KEY_LENGTH)) {
             sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INTEGRITY_FAILURE);
         }
 
@@ -1247,16 +1260,18 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
 
 
     /**
-     * Creates a "good" (32-byte-private-key) EC keypair.
+     * Creates a "good" EC keypair matching the expected curve sizes.
      *
-     * @param keyPair After call, this is set to a usable keypair. Before call, must be initialized with P256
-     *                curve points.
+     * @param keyPair After call, this is set to a usable keypair. Before call, must be initialized with curve points.
      * @param publicKeyBuffer Buffer into which to write the public key - must have PUBLIC_KEY_LENGTH bytes available.
      *                        If null, keypair will be created "blind" and public key not stored anywhere.
      * @param publicKeyOffset Offset into write buffer
+     * @param pointLength Length of a single curve point coordinate
+     * @param publicKeyLength Length of the uncompressed public key
      * @return true if successful, false if not.
      */
-    private boolean makeGoodKeyPair(KeyPair keyPair, byte[] publicKeyBuffer, short publicKeyOffset) {
+    private boolean makeGoodKeyPair(KeyPair keyPair, byte[] publicKeyBuffer, short publicKeyOffset,
+                                    short pointLength, short publicKeyLength) {
         for (short i = 1; i <= MAX_ATTEMPTS_TO_GET_GOOD_KEY; i++) {
             keyPair.genKeyPair();
 
@@ -1268,7 +1283,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
             // Let's roll the dice up to three times to make that happen less.
             short sLen = ((ECPrivateKey) keyPair.getPrivate()).getS(publicKeyBuffer, publicKeyOffset);
             short wLen = ((ECPublicKey) keyPair.getPublic()).getW(publicKeyBuffer, publicKeyOffset);
-            if (sLen == KEY_POINT_LENGTH && wLen == PUB_KEY_LENGTH
+            if (sLen == pointLength && wLen == publicKeyLength
                     && publicKeyBuffer[publicKeyOffset] == 0x04) {
                 return true;
             }
@@ -1532,17 +1547,41 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         }
 
         short algIntType = ub(buffer[readIdx++]);
-        if (algIntType == 0x0026) { // ES256...
-            transientStorage.setStoredVars((short) 1, (byte) 1);
-        } else if (algIntType == 0x0038 || algIntType == 0x0018) {
-            readIdx++;
-        } else if (algIntType == 0x0039 || algIntType == 0x0019) {
+        short coseAlg;
+        if (algIntType >= 0x0020 && algIntType <= 0x0037) {
+            coseAlg = (short) (-1 - (short) (algIntType - 0x20));
+        } else if (algIntType == 0x0038) {
+            if (readIdx >= lc) {
+                sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INVALID_CBOR);
+            }
+            coseAlg = (short) (-1 - ub(buffer[readIdx++]));
+        } else if (algIntType == 0x0039) {
+            if ((short)(readIdx + 1) >= lc) {
+                sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INVALID_CBOR);
+            }
+            coseAlg = (short) (-1 - Util.getShort(buffer, readIdx));
+            readIdx += 2;
+        } else if (algIntType <= 0x0017) {
+            coseAlg = (short) algIntType;
+        } else if (algIntType == 0x0018) {
+            if (readIdx >= lc) {
+                sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INVALID_CBOR);
+            }
+            coseAlg = ub(buffer[readIdx++]);
+        } else if (algIntType == 0x0019) {
+            if ((short)(readIdx + 1) >= lc) {
+                sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INVALID_CBOR);
+            }
+            coseAlg = Util.getShort(buffer, readIdx);
             readIdx += 2;
         } else {
-            if (!(algIntType >= 0x0020 && algIntType <= 0x0037)
-                    && !(algIntType >= 0x0000 && algIntType <= 0x0017)) {
-                sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
-            }
+            sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
+            return readIdx;
+        }
+
+        CurveParameters params = CurveParameters.forAlg(coseAlg);
+        if (params != null) {
+            transientStorage.setStoredVars(coseAlg, params.getCoseCurveId());
         }
 
         // Skip "type" val
@@ -1667,7 +1706,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         // Public key
         writeIdx = Util.arrayCopyNonAtomic(CannedCBOR.PUBLIC_KEY_ALG_PREAMBLE, (short) 0,
                 outBuf, writeIdx, (short) CannedCBOR.PUBLIC_KEY_ALG_PREAMBLE.length);
-        writeIdx = writePubKey(outBuf, writeIdx, pubKeyBuffer, pubKeyOffset);
+        writeIdx = writePubKey(outBuf, writeIdx, pubKeyBuffer, pubKeyOffset, KEY_POINT_LENGTH);
 
         short numExtensions = 0;
         if (hmacSecretEnabled) {
@@ -1837,17 +1876,18 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
      * @param outputLen The current index in the output buffer (begin writing here)
      * @param pubKeyBuffer A buffer containing the public key to be written in the format X || Y
      * @param pubKeyOffset An index pointing to the X-coordinate of the public key
+     * @param pointLength Length of one EC point coordinate
      *
      * @return New index in the output buffer after writes
      */
-    private short writePubKey(byte[] outBuf, short outputLen, byte[] pubKeyBuffer, short pubKeyOffset) {
+    private short writePubKey(byte[] outBuf, short outputLen, byte[] pubKeyBuffer, short pubKeyOffset, short pointLength) {
         outputLen = Util.arrayCopyNonAtomic(pubKeyBuffer, pubKeyOffset,
-                outBuf, outputLen, KEY_POINT_LENGTH);
+                outBuf, outputLen, pointLength);
         outBuf[outputLen++] = 0x22; // map key: y-coordinate
         outBuf[outputLen++] = 0x58; // byte string with one-byte length to follow
-        outBuf[outputLen++] = (byte) KEY_POINT_LENGTH;
-        outputLen = Util.arrayCopyNonAtomic(pubKeyBuffer, (short) (pubKeyOffset + KEY_POINT_LENGTH),
-                outBuf, outputLen, KEY_POINT_LENGTH);
+        outBuf[outputLen++] = (byte) pointLength;
+        outputLen = Util.arrayCopyNonAtomic(pubKeyBuffer, (short) (pubKeyOffset + pointLength),
+                outBuf, outputLen, pointLength);
         return outputLen;
     }
 
@@ -2551,13 +2591,13 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
     /**
      * Initializes the attester with a given key. After call, attestations may be made.
      *
-     * @param buffer Buffer containing 32 bytes of key data
+     * @param buffer Buffer containing curve-sized private key data
      * @param offset Offset into given buffer of key's first byte
      */
     private void loadScratchIntoAttester(byte[] buffer, short offset) {
         ECPrivateKey ecPrivateKey = (ECPrivateKey) ecKeyPair.getPrivate();
-        P256Constants.setCurve(ecPrivateKey);
-        ecPrivateKey.setS(buffer, offset, (short) 32);
+        curveParameters.applyTo(ecPrivateKey);
+        ecPrivateKey.setS(buffer, offset, KEY_POINT_LENGTH);
         attester.init(ecPrivateKey, Signature.MODE_SIGN);
     }
 
@@ -2694,7 +2734,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         if (mapType != (byte) 0xA3 && mapType != (byte) 0xA4) { // map, three or four entries
             sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
         }
-        if (readIdx >= (short)(lc - (CannedCBOR.PUBLIC_KEY_DH_ALG_PREAMBLE.length + KEY_POINT_LENGTH * 2 + 7))) {
+        if (readIdx >= (short)(lc - (CannedCBOR.PUBLIC_KEY_DH_ALG_PREAMBLE.length + KEY_AGREEMENT_POINT_LENGTH * 2 + 7))) {
             sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INVALID_CBOR);
         }
 
@@ -4180,8 +4220,8 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         bufferManager.informAPDUBufferAvailability(apdu, (short) 0xFF);
 
         // Create key pair
-        P256Constants.setCurve((ECPrivateKey) ecKeyPair.getPrivate());
-        if (!makeGoodKeyPair(ecKeyPair, publicKeyBuffer, publicKeyOffset)) {
+        curveParameters.applyTo((ECPrivateKey) ecKeyPair.getPrivate());
+        if (!makeGoodKeyPair(ecKeyPair, publicKeyBuffer, publicKeyOffset, KEY_POINT_LENGTH, PUB_KEY_LENGTH)) {
             throwException(ISO7816.SW_DATA_INVALID);
         }
 
@@ -5163,7 +5203,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
 
                 residentKeys[rkIndex].unpackPublicKey(
                         pkBuf, pkBufIdx);
-                writeOffset = writePubKey(outBuf, writeOffset, pkBuf, pkBufIdx);
+                writeOffset = writePubKey(outBuf, writeOffset, pkBuf, pkBufIdx, KEY_POINT_LENGTH);
 
                 bufferManager.release(apdu, pkBufHandle, PUB_KEY_LENGTH);
 
@@ -6419,7 +6459,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         readIdx += CannedCBOR.PUBLIC_KEY_DH_ALG_PREAMBLE.length;
 
         short xIdx = readIdx;
-        readIdx += KEY_POINT_LENGTH;
+        readIdx += KEY_AGREEMENT_POINT_LENGTH;
         if (readIdx > lc) {
             sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INVALID_CBOR);
         }
@@ -6429,25 +6469,25 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         if (buffer[readIdx++] != 0x58) { // byte string, one-byte length
             sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
         }
-        if (buffer[readIdx++] != KEY_POINT_LENGTH) {
+        if (buffer[readIdx++] != KEY_AGREEMENT_POINT_LENGTH) {
             sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
         }
 
         short yIdx = readIdx;
-        readIdx += KEY_POINT_LENGTH;
+        readIdx += KEY_AGREEMENT_POINT_LENGTH;
         if (readIdx > lc) {
             sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INVALID_CBOR);
         }
 
-        final short fullKeyLength = KEY_POINT_LENGTH * 2 + 1;
+        final short fullKeyLength = KEY_AGREEMENT_PUB_KEY_LENGTH;
 
         // Pack the public key into a nice compact representation (mangling the buffer)
-        short kpStart = (short)(yIdx - KEY_POINT_LENGTH - 1);
+        short kpStart = (short)(yIdx - KEY_AGREEMENT_POINT_LENGTH - 1);
         Util.arrayCopyNonAtomic(buffer, xIdx,
-                buffer, (short)(kpStart + 1), KEY_POINT_LENGTH); // place X just before Y and just after header
+                buffer, (short)(kpStart + 1), KEY_AGREEMENT_POINT_LENGTH); // place X just before Y and just after header
         buffer[kpStart] = 0x04; // "Uncompressed" EC point format - this idx is no longer in the x-point after we moved it
 
-        final short secretOffset = (short)(readIdx - KEY_POINT_LENGTH);
+        final short secretOffset = (short)(readIdx - KEY_AGREEMENT_POINT_LENGTH);
 
         // DH-generate the shared secret... (overwriting the public key we just put in the buffer)
         short rawSecretLength = keyAgreement.generateSecret(
@@ -6653,7 +6693,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         // Place public key into UPPER half of APDU buffer, away from where we are building the response
 
         ((ECPublicKey) authenticatorKeyAgreementKey.getPublic()).getW(outBuf, (short) 128);
-        outputLen = writePubKey(outBuf, outputLen, outBuf, (short) 129); // note: +1 to skip keyEncodingType byte
+        outputLen = writePubKey(outBuf, outputLen, outBuf, (short) 129, KEY_AGREEMENT_POINT_LENGTH); // note: +1 to skip keyEncodingType byte
 
         sendNoCopy(apdu, outputLen);
     }
@@ -6687,7 +6727,8 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
     private void forceInitKeyAgreementKey() {
         P256Constants.setCurve((ECKey) authenticatorKeyAgreementKey.getPrivate());
         P256Constants.setCurve((ECKey) authenticatorKeyAgreementKey.getPublic());
-        if (!makeGoodKeyPair(authenticatorKeyAgreementKey, bufferMem, (short) (bufferMem.length - 128))) {
+        if (!makeGoodKeyPair(authenticatorKeyAgreementKey, bufferMem, (short) (bufferMem.length - 128),
+                KEY_AGREEMENT_POINT_LENGTH, KEY_AGREEMENT_PUB_KEY_LENGTH)) {
             throwException(ISO7816.SW_DATA_INVALID);
         }
         keyAgreement.init(authenticatorKeyAgreementKey.getPrivate());
@@ -6744,7 +6785,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
      * @return An elliptic curve signature object suitable for the FIDO2 standard - ECDSA-SHA256
      */
     private Signature getECSig() {
-         return Signature.getInstance(Signature.ALG_ECDSA_SHA_256, false);
+         return Signature.getInstance(curveParameters.getSignatureAlgorithm(), false);
     }
 
     /**
@@ -6755,23 +6796,27 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
      * @return An uninitialized EC private key, ideally in RAM, but in flash if the authenticator doesn't support in-memory
      */
     private ECPrivateKey getECPrivKey(boolean forceAllowTransient, boolean allowDeselectMemory) {
+        return getECPrivKey(forceAllowTransient, allowDeselectMemory, curveParameters.getKeyBuilderLength());
+    }
+
+    private ECPrivateKey getECPrivKey(boolean forceAllowTransient, boolean allowDeselectMemory, short keyLength) {
         if (forceAllowTransient) {
             if (allowDeselectMemory) {
                 try {
-                    return (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE_TRANSIENT_DESELECT, KeyBuilder.LENGTH_EC_FP_256, false);
+                    return (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE_TRANSIENT_DESELECT, keyLength, false);
                 } catch (CryptoException e) {
                     // Oh well, unsupported, use normal RAM or flash instead
                 }
             }
 
             try {
-                return (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE_TRANSIENT_RESET, KeyBuilder.LENGTH_EC_FP_256, false);
+                return (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE_TRANSIENT_RESET, keyLength, false);
             } catch (CryptoException e) {
                 // Oh well, unsupported, use flash instead
             }
         }
 
-        return (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE, KeyBuilder.LENGTH_EC_FP_256, false);
+        return (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE, keyLength, false);
     }
 
     /**
@@ -6841,6 +6886,16 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         FLASH_SCRATCH_SIZE = 1024;
         STORE_PIN_LENGTH = true;
         CERTIFICATION_LEVEL = 0;
+
+        final CurveParameters params = CurveParameters.forAlg(CurveParameters.COSE_ALG_ES256);
+        if (params == null) {
+            throwException(ISO7816.SW_UNKNOWN);
+        }
+        curveParameters = params;
+        KEY_POINT_LENGTH = curveParameters.getPointLength();
+        PUB_KEY_LENGTH = curveParameters.getPublicKeyLength();
+        CREDENTIAL_PAYLOAD_LEN = curveParameters.getCredentialPayloadLength();
+        CREDENTIAL_ID_LEN = curveParameters.getCredentialIdLength();
 
         // Next, read any overrides
         final short initOffset = offset;
@@ -7016,7 +7071,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
     private void initAuthenticatorKey(boolean authenticatorKeyInRam) {
         authenticatorKeyAgreementKey = new KeyPair(
                 (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, KeyBuilder.LENGTH_EC_FP_256, false),
-                getECPrivKey(authenticatorKeyInRam, false)
+                getECPrivKey(authenticatorKeyInRam, false, KeyBuilder.LENGTH_EC_FP_256)
         );
         P256Constants.setCurve((ECKey) authenticatorKeyAgreementKey.getPrivate());
         P256Constants.setCurve((ECKey) authenticatorKeyAgreementKey.getPublic());
@@ -7030,11 +7085,11 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
     private void initCredKey(boolean ecPairInRam) {
         // RAM usage - (ideally) ephemeral keys
         ecKeyPair = new KeyPair(
-                (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, KeyBuilder.LENGTH_EC_FP_256, false),
+                (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, curveParameters.getKeyBuilderLength(), false),
                 getECPrivKey(ecPairInRam, true)
         );
-        P256Constants.setCurve((ECKey) ecKeyPair.getPrivate());
-        P256Constants.setCurve((ECKey) ecKeyPair.getPublic());
+        curveParameters.applyTo((ECKey) ecKeyPair.getPrivate());
+        curveParameters.applyTo((ECKey) ecKeyPair.getPublic());
     }
 
     /**
@@ -7137,7 +7192,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
 
     private short loadAttestationPrivateKey(byte[] params, short offset) {
         attestationKey = getECPrivKey(false, false);
-        P256Constants.setCurve(attestationKey);
+        curveParameters.applyTo(attestationKey);
         attestationKey.setS(params, offset, KEY_POINT_LENGTH);
         return KEY_POINT_LENGTH;
     }
@@ -7228,8 +7283,8 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
 
             if (ecKeyPair.getPrivate().getType() == KeyBuilder.TYPE_EC_FP_PRIVATE) {
                 initCredKey(true);
-                P256Constants.setCurve((ECPrivateKey) ecKeyPair.getPrivate());
-                P256Constants.setCurve((ECPublicKey) ecKeyPair.getPublic());
+                curveParameters.applyTo((ECPrivateKey) ecKeyPair.getPrivate());
+                curveParameters.applyTo((ECPublicKey) ecKeyPair.getPublic());
             }
 
             availableMem = JCSystem.getAvailableMemory(JCSystem.MEMORY_TYPE_TRANSIENT_DESELECT);
