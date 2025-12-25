@@ -15,3 +15,5 @@ jobs:
           owner: wl336
           base: master
           head: master
+          ignore_fail: true
+
