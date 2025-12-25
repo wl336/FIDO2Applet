@@ -12,7 +12,6 @@ jobs:
     steps:
       - uses: tgymnich/fork-sync@v2.0
         with:
-          token: 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
           owner: wl336
           base: master
           head: master
