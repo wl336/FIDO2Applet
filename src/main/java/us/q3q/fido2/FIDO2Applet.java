@@ -159,6 +159,34 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
      */
     private static final short CREDENTIAL_ID_LEN = (short)(CREDENTIAL_PAYLOAD_LEN + IV_LEN + 16);
     /**
+     * Offset within the decrypted credential payload where the credProtect byte is stored
+     */
+    private static final short CREDENTIAL_PROTECT_OFFSET = (short)(RP_HASH_LEN + KEY_POINT_LENGTH);
+    /**
+     * Offset within the decrypted credential payload where the credential algorithm is stored
+     */
+    private static final short CREDENTIAL_ALG_OFFSET = (short)(CREDENTIAL_PROTECT_OFFSET + 1);
+    /**
+     * Offset within the decrypted credential payload where the credential curve identifier is stored
+     */
+    private static final short CREDENTIAL_CURVE_OFFSET = (short)(CREDENTIAL_ALG_OFFSET + 2);
+    /**
+     * Algorithm identifier for ES256
+     */
+    private static final short ES256_ALGORITHM = (short) -7;
+    /**
+     * Identifier for the P-256 curve
+     */
+    private static final byte P256_CURVE_ID = 0x01;
+    /**
+     * Sentinel used when no algorithm expectation is provided
+     */
+    private static final short ALG_UNSPECIFIED = Short.MIN_VALUE;
+    /**
+     * Sentinel used when no curve expectation is provided
+     */
+    private static final byte CURVE_UNSPECIFIED = 0x00;
+    /**
      * Byte length of an uncompressed EC public key
      */
     private static final short PUB_KEY_LENGTH = (short)(2 * KEY_POINT_LENGTH + 1);
@@ -1807,8 +1835,11 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                 outBuffer, payloadOffset, KEY_POINT_LENGTH);
 
         outBuffer[payloadOffset++] = (byte)(rkNum >= 0 ? (0x80 | credProtectLevel) : credProtectLevel);
-        random.generateData(outBuffer, payloadOffset, (short) 15);
-        payloadOffset += 15;
+        Util.setShort(outBuffer, payloadOffset, ES256_ALGORITHM);
+        payloadOffset += 2;
+        outBuffer[payloadOffset++] = P256_CURVE_ID;
+        random.generateData(outBuffer, payloadOffset, (short) 12);
+        payloadOffset += 12;
 
         symmetricWrapper.init(key, Cipher.MODE_ENCRYPT,
                 outBuffer, outOffset, IV_LEN);
@@ -1939,6 +1970,8 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         byte numMatchesThisRP = 0;
         short rkMatch = -1;
         short allowListLength = 0;
+        short requestedAlg = ES256_ALGORITHM;
+        byte requestedCurve = P256_CURVE_ID;
 
         if (resetRequested) {
             resetRequested = false;
@@ -2107,22 +2140,60 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
 
                         break;
                     case 0x05: // options
-                        readIdx = processOptionsMap(apdu, buffer, readIdx, lc, false, false);
-                        break;
-                    case 0x06: // pinAuth
-                        pinAuthIdx = readIdx;
-                        // Read past this and come back later, when pinProtocol is set correctly
-                        readIdx = consumeAnyEntity(apdu, buffer, readIdx, lc);
-                        break;
-                    case 0x07: // pinProtocol
-                        stateKeepingBuffer[stateKeepingIdx] = buffer[readIdx++];
-                        checkPinProtocolSupported(apdu, stateKeepingBuffer[stateKeepingIdx]);
-                        break;
-                    default:
-                        readIdx = consumeAnyEntity(apdu, buffer, readIdx, lc);
-                        break;
-                }
+                    readIdx = processOptionsMap(apdu, buffer, readIdx, lc, false, false);
+                    break;
+                case 0x06: // pinAuth
+                    pinAuthIdx = readIdx;
+                    // Read past this and come back later, when pinProtocol is set correctly
+                    readIdx = consumeAnyEntity(apdu, buffer, readIdx, lc);
+                    break;
+                case 0x07: // pinProtocol
+                    stateKeepingBuffer[stateKeepingIdx] = buffer[readIdx++];
+                    checkPinProtocolSupported(apdu, stateKeepingBuffer[stateKeepingIdx]);
+                    break;
+                case 0x08: // alg
+                    short algType = ub(buffer[readIdx++]);
+                    short parsedAlg;
+                    if (algType < 0x18) {
+                        parsedAlg = algType;
+                    } else if (algType >= 0x20 && algType < 0x38) {
+                        parsedAlg = (short) (-1 - (algType - 0x20));
+                    } else if (algType == 0x18) {
+                        if (readIdx >= lc) {
+                            sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INVALID_CBOR);
+                        }
+                        parsedAlg = (short) ub(buffer[readIdx++]);
+                    } else if (algType == 0x38) {
+                        if (readIdx >= lc) {
+                            sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INVALID_CBOR);
+                        }
+                        parsedAlg = (short) (-1 - ub(buffer[readIdx++]));
+                    } else if (algType == 0x19 || algType == 0x39) {
+                        if ((short)(readIdx + 1) >= lc) {
+                            sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INVALID_CBOR);
+                        }
+                        short val = Util.getShort(buffer, readIdx);
+                        readIdx += 2;
+                        if (algType == 0x19) {
+                            parsedAlg = val;
+                        } else {
+                            parsedAlg = (short) (-1 - val);
+                        }
+                    } else {
+                        sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
+                        parsedAlg = ALG_UNSPECIFIED; // unreachable
+                    }
+                    requestedAlg = parsedAlg;
+                    requestedCurve = P256_CURVE_ID;
+                    if (requestedAlg != ES256_ALGORITHM) {
+                        sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_UNSUPPORTED_ALGORITHM);
+                    }
+                    break;
+                default:
+                    readIdx = consumeAnyEntity(apdu, buffer, readIdx, lc);
+                    break;
             }
+        }
 
             if (hmacSecretReadIdx != -1) {
                 // Check validity of HMAC salt parameters before we validate the PIN
@@ -2232,7 +2303,8 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                     rkMatch = scanRKsForExactCredential(buffer, credIdx);
 
                     if (checkCredential(apdu, buffer, credIdx, credLen, scratchRPIDHashBuffer, scratchRPIDHashIdx,
-                            credStorageBuffer, credStorageOffset, rkMatch, (byte)(pinProvided ? 3 : 2))) {
+                            credStorageBuffer, credStorageOffset, rkMatch, (byte)(pinProvided ? 3 : 2),
+                            requestedAlg, requestedCurve)) {
                         // valid credential
                         acceptedMatch = true;
 
@@ -2269,7 +2341,8 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
             final short firstCred = firstCredIdx == 0 ? (short)(numResidentCredentials - 1) : (short)(firstCredIdx - 2);
             for (short i = firstCred; i >= 0; i--) {
                 if (checkCredential(apdu, i, scratchRPIDHashBuffer, scratchRPIDHashIdx,
-                        credTempBuffer, credTempOffset, (byte)(pinAuthPerformed ? 3 : 1))) {
+                        credTempBuffer, credTempOffset, (byte)(pinAuthPerformed ? 3 : 1),
+                        requestedAlg, requestedCurve)) {
                     // Got a resident key hit!
 
                     numMatchesThisRP++;
@@ -2862,7 +2935,18 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         return checkCredential(apdu, residentKeys[rkNum].getEncryptedCredentialID(), (short) 0, residentKeys[rkNum].getCredLen(),
                 rpIdBuf, rpIdHashIdx,
                 outputBuffer, outputOffset,
-                rkNum, maximumCredProtectLevel);
+                rkNum, maximumCredProtectLevel, ALG_UNSPECIFIED, CURVE_UNSPECIFIED);
+    }
+
+    private boolean checkCredential(APDU apdu, short rkNum,
+                                    byte[] rpIdBuf, short rpIdHashIdx,
+                                    byte[] outputBuffer, short outputOffset,
+                                    byte maximumCredProtectLevel,
+                                    short expectedAlg, byte expectedCurve) {
+        return checkCredential(apdu, residentKeys[rkNum].getEncryptedCredentialID(), (short) 0, residentKeys[rkNum].getCredLen(),
+                rpIdBuf, rpIdHashIdx,
+                outputBuffer, outputOffset,
+                rkNum, maximumCredProtectLevel, expectedAlg, expectedCurve);
     }
 
     /**
@@ -2888,6 +2972,16 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                                     byte[] rpIdBuf, short rpIdHashIdx,
                                     byte[] outputBuffer, short outputOffset,
                                     short rkNum, byte maximumCredProtectLevel) {
+        return checkCredential(apdu, credentialBuffer, credentialOffset, credentialLen,
+                rpIdBuf, rpIdHashIdx, outputBuffer, outputOffset, rkNum, maximumCredProtectLevel,
+                ALG_UNSPECIFIED, CURVE_UNSPECIFIED);
+    }
+
+    private boolean checkCredential(APDU apdu, byte[] credentialBuffer, short credentialOffset, short credentialLen,
+                                    byte[] rpIdBuf, short rpIdHashIdx,
+                                    byte[] outputBuffer, short outputOffset,
+                                    short rkNum, byte maximumCredProtectLevel,
+                                    short expectedAlg, byte expectedCurve) {
         if (credentialLen != CREDENTIAL_ID_LEN) {
             // Someone's playing silly games...
             return false;
@@ -2936,9 +3030,12 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
 
             matches = gottenCredProtLevel <= maximumCredProtectLevel && (!wasRKPreviously || rkNum >= 0);
 
-            // check RP ID
+            // check RP ID and algorithm/curve constraints
             if (Util.arrayCompare(outputBuffer, outputOffset,
                     rpIdBuf, rpIdHashIdx, RP_HASH_LEN) != 0) {
+                matches = false;
+            }
+            if (matches && !credentialAlgCurveMatch(outputBuffer, outputOffset, expectedAlg, expectedCurve)) {
                 matches = false;
             }
         }
@@ -2955,6 +3052,9 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
 
             if (Util.arrayCompare(outputBuffer, outputOffset,
                     rpIdBuf, rpIdHashIdx, RP_HASH_LEN) != 0) {
+                matches = false;
+            }
+            if (matches && !credentialAlgCurveMatch(outputBuffer, outputOffset, expectedAlg, expectedCurve)) {
                 matches = false;
             }
         }
@@ -2981,6 +3081,31 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         final AESKey key = getAESKeyForExistingRK(residentKeyNum);
         return extractCredentialMixed(credentialBuffer, credentialIndex,
                 outputBuffer, outputOffset, key);
+    }
+
+    private boolean credentialAlgCurveMatch(byte[] outputBuffer, short outputOffset,
+                                            short expectedAlg, byte expectedCurve) {
+        short storedAlg = Util.getShort(outputBuffer, (short)(outputOffset + CREDENTIAL_ALG_OFFSET));
+        byte storedCurve = outputBuffer[(short)(outputOffset + CREDENTIAL_CURVE_OFFSET)];
+
+        if (storedAlg == ALG_UNSPECIFIED || storedAlg == 0) {
+            storedAlg = ES256_ALGORITHM;
+        }
+        if (storedCurve == CURVE_UNSPECIFIED) {
+            storedCurve = P256_CURVE_ID;
+        }
+
+        if (storedAlg != ES256_ALGORITHM || storedCurve != P256_CURVE_ID) {
+            return false;
+        }
+        if (expectedAlg != ALG_UNSPECIFIED && storedAlg != expectedAlg) {
+            return false;
+        }
+        if (expectedCurve != CURVE_UNSPECIFIED && storedCurve != expectedCurve) {
+            return false;
+        }
+
+        return true;
     }
 
     /**
