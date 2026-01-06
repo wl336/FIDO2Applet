@@ -1,5 +1,7 @@
 package us.q3q.fido2;
 
+import javacard.framework.Util;
+
 /**
  * Pre-packed CBOR objects for convenience and speed
  */
@@ -202,8 +204,7 @@ public abstract class CannedCBOR {
     };
 
     static final byte[] ES256_ALG_TYPE = {
-            (byte) 0x81, // array - one item
-                (byte) 0xA2, // map - two entries
+            (byte) 0xA3, // map - three entries
                     0x63, // string - three bytes long
                         0x61, 0x6C, 0x67, // alg
                         0x26, // -7 (alg ID for ES256)
@@ -211,7 +212,49 @@ public abstract class CannedCBOR {
                         0x74, 0x79, 0x70, 0x65, // type
                         0x6A, // string - ten bytes long
                             0x70, 0x75, 0x62, 0x6C, 0x69, 0x63, 0x2D, 0x6B, 0x65, 0x79, // public-key
+                    0x63, // string - three bytes long
+                        0x63, 0x72, 0x76, // crv
+                        0x01, // P-256
     };
+
+    static final byte[] ES384_ALG_TYPE = {
+            (byte) 0xA3, // map - three entries
+                    0x63, // string - three bytes long
+                        0x61, 0x6C, 0x67, // alg
+                        0x38, 0x22, // -35 (alg ID for ES384)
+                    0x64, // string - four bytes long
+                        0x74, 0x79, 0x70, 0x65, // type
+                        0x6A, // string - ten bytes long
+                            0x70, 0x75, 0x62, 0x6C, 0x69, 0x63, 0x2D, 0x6B, 0x65, 0x79, // public-key
+                    0x63, // string - three bytes long
+                        0x63, 0x72, 0x76, // crv
+                        0x02, // P-384
+    };
+
+    static final byte[] ES512_ALG_TYPE = {
+            (byte) 0xA3, // map - three entries
+                    0x63, // string - three bytes long
+                        0x61, 0x6C, 0x67, // alg
+                        0x38, 0x23, // -36 (alg ID for ES512)
+                    0x64, // string - four bytes long
+                        0x74, 0x79, 0x70, 0x65, // type
+                        0x6A, // string - ten bytes long
+                            0x70, 0x75, 0x62, 0x6C, 0x69, 0x63, 0x2D, 0x6B, 0x65, 0x79, // public-key
+                    0x63, // string - three bytes long
+                        0x63, 0x72, 0x76, // crv
+                        0x03, // P-521
+    };
+
+    static final byte[] ALG_TYPE_ARRAY;
+
+    static {
+        ALG_TYPE_ARRAY = new byte[(short) (1 + ES256_ALG_TYPE.length + ES384_ALG_TYPE.length + ES512_ALG_TYPE.length)];
+        ALG_TYPE_ARRAY[0] = (byte) 0x83; // array - three items
+        short offset = 1;
+        offset = Util.arrayCopyNonAtomic(ES256_ALG_TYPE, (short) 0, ALG_TYPE_ARRAY, offset, (short) ES256_ALG_TYPE.length);
+        offset = Util.arrayCopyNonAtomic(ES384_ALG_TYPE, (short) 0, ALG_TYPE_ARRAY, offset, (short) ES384_ALG_TYPE.length);
+        Util.arrayCopyNonAtomic(ES512_ALG_TYPE, (short) 0, ALG_TYPE_ARRAY, offset, (short) ES512_ALG_TYPE.length);
+    }
 
     static final byte[] INITIAL_LARGE_BLOB_ARRAY = { // magic hashed encoded empty CBOR array
             (byte) 0x80, 0x76, (byte) 0xBE, (byte) 0x8B,

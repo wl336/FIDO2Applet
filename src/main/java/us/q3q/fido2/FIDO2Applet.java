@@ -5642,7 +5642,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         } else {
             // We have an E-APDU, buf there's not room for our response in the outgoing
             // buffer. Write aside.
-            final short remainingAmountToWrite = (short)(CannedCBOR.ES256_ALG_TYPE.length
+            final short remainingAmountToWrite = (short)(CannedCBOR.ALG_TYPE_ARRAY.length
                     + (approximateKeyCount > 23 ? 2 : 1) // encoded length of approxKeyCount
                     + (minPinLength > 23 ? 2 : 1) // encoded length of minPinLength
                     + 23 // fixed overhead;
@@ -5659,8 +5659,8 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         offset = encodeIntTo(buffer, offset, (byte) CREDENTIAL_ID_LEN); // 2 bytes = 3
 
         buffer[offset++] = 0x0A; // map key: algorithms: 1 byte = 4
-        offset = Util.arrayCopyNonAtomic(CannedCBOR.ES256_ALG_TYPE, (short) 0,
-                buffer, offset, (short) CannedCBOR.ES256_ALG_TYPE.length); // added separately
+        offset = Util.arrayCopyNonAtomic(CannedCBOR.ALG_TYPE_ARRAY, (short) 0,
+                buffer, offset, (short) CannedCBOR.ALG_TYPE_ARRAY.length); // added separately
 
         buffer[offset++] = 0x0B; // map key: maxSerializedLargeBlobArray: 1 byte = 5
         buffer[offset++] = 0x19; // two-byte integer: 1 byte = 6
