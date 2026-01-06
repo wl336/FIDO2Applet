@@ -57,9 +57,21 @@ public final class TransientStorage {
      */
     private static final byte IDX_BOOLEAN_OMNIBUS = 13; // 1 byte
     /**
+     * COSE algorithm selected for the current credential operation
+     */
+    private static final byte IDX_SELECTED_ALG = 14; // 2 bytes
+    /**
+     * COSE curve selected for the current credential operation
+     */
+    private static final byte IDX_SELECTED_CURVE = 16; // 1 byte
+    /**
+     * Indicates that the current credential operation has selected an algorithm/curve combo
+     */
+    private static final byte IDX_SELECTED_ALG_IS_SET = 17; // 1 byte
+    /**
      * How many bytes long the temp storage should be
      */
-    private static final byte NUM_RESET_BYTES = 14;
+    private static final byte NUM_RESET_BYTES = 18;
 
     // boolean bit indices held in BOOLEAN_OMNIBUS byte above
     /**
@@ -336,5 +348,29 @@ public final class TransientStorage {
 
     public byte getPinPermissions() {
         return (byte)(tempBytes[IDX_PIN_PROTOCOL_NUMBER_AND_PERMISSIONS] & 0x3F);
+    }
+
+    public void clearSelectedAlgAndCurve() {
+        tempBytes[IDX_SELECTED_ALG_IS_SET] = 0;
+        Util.setShort(tempBytes, IDX_SELECTED_ALG, (short) 0);
+        tempBytes[IDX_SELECTED_CURVE] = 0;
+    }
+
+    public void setSelectedAlgAndCurve(short alg, byte curve) {
+        Util.setShort(tempBytes, IDX_SELECTED_ALG, alg);
+        tempBytes[IDX_SELECTED_CURVE] = curve;
+        tempBytes[IDX_SELECTED_ALG_IS_SET] = 1;
+    }
+
+    public boolean hasSelectedAlgAndCurve() {
+        return tempBytes[IDX_SELECTED_ALG_IS_SET] != 0;
+    }
+
+    public short getSelectedAlg() {
+        return Util.getShort(tempBytes, IDX_SELECTED_ALG);
+    }
+
+    public byte getSelectedCurve() {
+        return tempBytes[IDX_SELECTED_CURVE];
     }
 }

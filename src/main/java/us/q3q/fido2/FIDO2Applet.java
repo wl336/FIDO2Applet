@@ -141,6 +141,20 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
      */
     private static final short KEY_POINT_LENGTH = 32;
     /**
+     * COSE algorithm identifiers supported by the authenticator
+     */
+    private static final short COSE_ALG_ES256 = (short) -7;
+    private static final short COSE_ALG_ES384 = (short) -35;
+    private static final short COSE_ALG_ES512 = (short) -36;
+    /**
+     * COSE curve identifier used by the authenticator
+     */
+    private static final byte COSE_CRV_P256 = 0x01;
+    /**
+     * Number of supported COSE algorithms
+     */
+    private static final byte NUM_SUPPORTED_ALGORITHMS = 3;
+    /**
      * Byte length of hashed relying party ID
      */
     private static final short RP_HASH_LEN = 32;
@@ -263,7 +277,10 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
     /**
      * used for signing the authData we send to the platform, to prove it came from us
      */
-    private final Signature attester;
+    private Signature attester;
+    private Signature attesterES256;
+    private Signature attesterES384;
+    private Signature attesterES512;
 
     // Fields for wrapping and unwrapping platform-held blobs
     /**
@@ -549,6 +566,8 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
     private void makeCredential(APDU apdu, short lc, byte[] buffer) {
         short readIdx = 1;
 
+        transientStorage.clearSelectedAlgAndCurve();
+
         if (lc == 0) {
             sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_MISSING_PARAMETER);
         }
@@ -625,19 +644,13 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
             sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
         }
 
-        // We only support one algorithm, so let's find that one.
-        boolean foundES256 = false;
+        // Find the first supported algorithm.
         final short numPubKeys = (short)(pubKeyCredParamsType & 0x0F);
         for (short i = 0; i < numPubKeys; i++) {
             readIdx = checkIfPubKeyBlockSupported(apdu, buffer, readIdx, lc);
-            if (transientStorage.getStoredLen() != -1) {
-                foundES256 = true;
-                // cannot break here because we need to check for any
-                // invalid pubKeyCredParams entries that come later...
-            }
         }
 
-        if (!foundES256) {
+        if (!transientStorage.hasSelectedAlgAndCurve()) {
             sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_UNSUPPORTED_ALGORITHM);
         }
 
@@ -1162,8 +1175,12 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
             flags = (byte)(flags | 0x80);
         }
 
+        final short coseAlg = getStoredAlgOrDefault();
+        final byte coseCurve = getStoredCurveOrDefault();
+
         final short adAddlBytes = writeAD(bufferMem, outputLen, adLen, scratchRPIDHashBuffer, scratchRPIDHashOffset,
-                scratchPublicKeyBuffer, (short)(scratchPublicKeyOffset + 1), flags, hmacSecretEnabled, credProtectLevel,
+                scratchPublicKeyBuffer, (short)(scratchPublicKeyOffset + 1), flags, coseAlg, coseCurve,
+                hmacSecretEnabled, credProtectLevel,
                 uvmRequested, minPinRequested, (byte) (credBlobIdx != -1 ? (credBlobLen <= MAX_CRED_BLOB_LEN ? 1 : -1) : 0),
                 scratchCredBuffer, scratchCredOffset);
 
@@ -1174,17 +1191,17 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         Util.arrayCopyNonAtomic(clientDataHashBuffer, clientDataHashScratchOffset,
                 bufferMem, outputLen, CLIENT_DATA_HASH_LEN);
 
+        prepareAttesterForAlg(apdu, coseAlg);
+
         boolean selfAttestation = attestationKey == null;
-        byte[] attestationPreamble;
         if (selfAttestation) {
             attester.init(ecKeyPair.getPrivate(), Signature.MODE_SIGN);
-            attestationPreamble = CannedCBOR.SELF_ATTESTATION_STATEMENT_PREAMBLE;
         } else {
             attester.init(attestationKey, Signature.MODE_SIGN);
-            attestationPreamble = CannedCBOR.BASIC_ATTESTATION_STATEMENT_PREAMBLE;
         }
+        final short attestationPreambleLen = (short) (10 + getEncodedIntLength(coseAlg));
         final short sigLength = attester.sign(bufferMem, offsetForStartOfAuthData, (short)(adLen + CLIENT_DATA_HASH_LEN),
-                bufferMem, (short) (outputLen + attestationPreamble.length + 2));
+                bufferMem, (short) (outputLen + attestationPreambleLen + 2));
 
         // EC key pair COULD be stored in flash (if device doesn't support transient EC privKeys), so might as
         // well clear it out here since we don't need it anymore. We'll get its private key back from the credential
@@ -1192,8 +1209,8 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         ecKeyPair.getPrivate().clearKey();
 
         // Attestation statement
-        outputLen = Util.arrayCopyNonAtomic(attestationPreamble, (short) 0,
-                bufferMem, outputLen, (short) attestationPreamble.length);
+        writeAttestationStatementPreamble(bufferMem, outputLen, selfAttestation, coseAlg);
+        outputLen += attestationPreambleLen;
 
         if (sigLength < 24) {
             // We won't be needing that extra byte... shift the signature back one byte
@@ -1508,74 +1525,112 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
      * @return New read index into bufferMem after consuming public key block
      */
     private short checkIfPubKeyBlockSupported(APDU apdu, byte[] buffer, short readIdx, short lc) {
-        transientStorage.readyStoredVars();
+        boolean foundAlg = false;
+        boolean foundType = false;
+        boolean typeValid = false;
+        boolean supportedAlg = false;
+        short parsedAlg = 0;
+        byte parsedCurve = COSE_CRV_P256;
 
         byte mapDef = buffer[readIdx++];
-        if ((mapDef & 0xF0) != 0xA0) {
-            sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
-        }
-        short numMapEntries = (short)(ub(mapDef) - ub((byte) 0xA0));
+        final short numMapEntries = getMapEntryCount(apdu, mapDef);
         if (numMapEntries < 2) {
             sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_MISSING_PARAMETER);
         }
         if (readIdx >= lc) {
             sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INVALID_CBOR);
         }
-        if (buffer[readIdx++] != 0x63) {
-            sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
-        }
-        if (readIdx >= (short)(lc-4)) {
-            sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INVALID_CBOR);
-        }
-        if (buffer[readIdx++] != 'a' || buffer[readIdx++] != 'l' || buffer[readIdx++] != 'g') {
-            sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_MISSING_PARAMETER);
-        }
 
-        short algIntType = ub(buffer[readIdx++]);
-        if (algIntType == 0x0026) { // ES256...
-            transientStorage.setStoredVars((short) 1, (byte) 1);
-        } else if (algIntType == 0x0038 || algIntType == 0x0018) {
-            readIdx++;
-        } else if (algIntType == 0x0039 || algIntType == 0x0019) {
-            readIdx += 2;
-        } else {
-            if (!(algIntType >= 0x0020 && algIntType <= 0x0037)
-                    && !(algIntType >= 0x0000 && algIntType <= 0x0017)) {
+        for (short i = 0; i < numMapEntries; i++) {
+            if (readIdx >= lc) {
+                sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INVALID_CBOR);
+            }
+            final short keyType = ub(buffer[readIdx++]);
+            short keyLen;
+            if (keyType == 0x0078) {
+                keyLen = ub(buffer[readIdx++]);
+            } else if (keyType >= 0x0060 && keyType <= 0x0077) {
+                keyLen = (short) (keyType - 0x0060);
+            } else {
                 sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
+                return readIdx;
+            }
+            if (readIdx >= lc || (short)(lc - readIdx) < keyLen) {
+                sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INVALID_CBOR);
+            }
+
+            final boolean keyIsAlg = (keyLen == 3 && buffer[readIdx] == 'a' && buffer[(short)(readIdx + 1)] == 'l'
+                    && buffer[(short)(readIdx + 2)] == 'g');
+            final boolean keyIsType = (keyLen == 4 && buffer[readIdx] == 't' && buffer[(short)(readIdx + 1)] == 'y'
+                    && buffer[(short)(readIdx + 2)] == 'p' && buffer[(short)(readIdx + 3)] == 'e');
+
+            readIdx += keyLen;
+            if (readIdx >= lc) {
+                sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INVALID_CBOR);
+            }
+
+            if (keyIsAlg) {
+                if (foundAlg) {
+                    sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INVALID_CBOR);
+                }
+                foundAlg = true;
+                final short algDescriptor = ub(buffer[readIdx++]);
+                final byte majorType = (byte) (algDescriptor & 0xE0);
+                final byte additionalInfo = (byte) (algDescriptor & 0x1F);
+                if (majorType != 0x20) {
+                    sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
+                }
+                short magnitude;
+                if (additionalInfo < 24) {
+                    magnitude = additionalInfo;
+                } else if (additionalInfo == 24) {
+                    if (readIdx >= lc) {
+                        sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INVALID_CBOR);
+                    }
+                    magnitude = ub(buffer[readIdx++]);
+                } else if (additionalInfo == 25) {
+                    if (readIdx >= (short)(lc - 1)) {
+                        sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INVALID_CBOR);
+                    }
+                    magnitude = Util.getShort(buffer, readIdx);
+                    readIdx += 2;
+                } else {
+                    sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
+                    return readIdx;
+                }
+                parsedAlg = (short) (-1 - magnitude);
+                supportedAlg = isSupportedAlg(parsedAlg);
+                parsedCurve = deriveCurveFromAlg(parsedAlg);
+            } else if (keyIsType) {
+                if (foundType) {
+                    sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INVALID_CBOR);
+                }
+                foundType = true;
+
+                final short typeDescriptor = ub(buffer[readIdx++]);
+                if (typeDescriptor < 0x60 || typeDescriptor > 0x77) {
+                    sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
+                }
+                final short typeLen = (short) (typeDescriptor - 0x60);
+                if (readIdx >= (short)(lc - typeLen + 1)) {
+                    sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INVALID_CBOR);
+                }
+                if (typeLen == CannedCBOR.PUBLIC_KEY_TYPE.length &&
+                        Util.arrayCompare(buffer, readIdx, CannedCBOR.PUBLIC_KEY_TYPE, (short) 0, typeLen) == 0) {
+                    typeValid = true;
+                }
+                readIdx += typeLen;
+            } else {
+                readIdx = consumeAnyEntity(apdu, buffer, readIdx, lc);
             }
         }
 
-        // Skip "type" val
-        short typeB = ub(buffer[readIdx]);
-        if (typeB < 0x60 || typeB > 0x77) {
-            sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
-        }
-        short valLen = (short)(typeB - 0x60);
-        readIdx += valLen + 1;
-        if (readIdx >= lc) {
-            sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INVALID_CBOR);
+        if (!foundAlg || !foundType) {
+            sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_MISSING_PARAMETER);
         }
 
-        short typeValB = ub(buffer[readIdx]);
-        if (typeValB < 0x60 || typeValB > 0x77) {
-            sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
-        }
-        short typeValLen = (short)(typeValB - 0x60);
-        if (typeValLen != CannedCBOR.PUBLIC_KEY_TYPE.length) {
-            // not the same length as type "public-key": can't be a match
-            transientStorage.readyStoredVars();
-        } else if (Util.arrayCompare(buffer, (short)(readIdx + 1),
-                CannedCBOR.PUBLIC_KEY_TYPE, (short) 0, typeValLen) != 0) {
-            // Not of type "public-key", although same length
-            transientStorage.readyStoredVars();
-        }
-        readIdx += typeValLen + 1;
-        if (readIdx >= lc) {
-            sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INVALID_CBOR);
-        }
-
-        for (short i = 2; i < numMapEntries; i++) {
-            readIdx = consumeAnyEntity(apdu, buffer, readIdx, lc);
+        if (supportedAlg && typeValid && !transientStorage.hasSelectedAlgAndCurve()) {
+            transientStorage.setSelectedAlgAndCurve(parsedAlg, parsedCurve);
         }
 
         return readIdx;
@@ -1647,7 +1702,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
      */
     private short writeAD(byte[] outBuf,
                           short writeIdx, short adLen, byte[] rpIdHashBuffer, short rpIdHashOffset,
-                          byte[] pubKeyBuffer, short pubKeyOffset, byte flags,
+                          byte[] pubKeyBuffer, short pubKeyOffset, byte flags, short coseAlg, byte coseCurve,
                           boolean hmacSecretEnabled, byte credProtectLevel, boolean uvmRequested,
                           boolean minPinRequested, byte credBlobState,
                           byte[] encodedCredBuffer, short encodedCredOffset) {
@@ -1665,8 +1720,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                 outBuf, writeIdx, CREDENTIAL_ID_LEN);
 
         // Public key
-        writeIdx = Util.arrayCopyNonAtomic(CannedCBOR.PUBLIC_KEY_ALG_PREAMBLE, (short) 0,
-                outBuf, writeIdx, (short) CannedCBOR.PUBLIC_KEY_ALG_PREAMBLE.length);
+        writeIdx = writePublicKeyPreamble(outBuf, writeIdx, coseAlg, coseCurve);
         writeIdx = writePubKey(outBuf, writeIdx, pubKeyBuffer, pubKeyOffset);
 
         short numExtensions = 0;
@@ -1807,8 +1861,11 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                 outBuffer, payloadOffset, KEY_POINT_LENGTH);
 
         outBuffer[payloadOffset++] = (byte)(rkNum >= 0 ? (0x80 | credProtectLevel) : credProtectLevel);
-        random.generateData(outBuffer, payloadOffset, (short) 15);
-        payloadOffset += 15;
+        outBuffer[payloadOffset++] = getStoredCurveOrDefault();
+        Util.setShort(outBuffer, payloadOffset, getStoredAlgOrDefault());
+        payloadOffset += 2;
+        random.generateData(outBuffer, payloadOffset, (short) 12);
+        payloadOffset += 12;
 
         symmetricWrapper.init(key, Cipher.MODE_ENCRYPT,
                 outBuffer, outOffset, IV_LEN);
@@ -1877,12 +1934,13 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
 
         final byte minPinExtBytes = (byte)(minPinLength > 23 ? 4 : 3);
         final byte uvmExtBytes = (byte)((flags & 0x04) != 0 ? 9 : 7);
+        final short publicKeyPreambleLen = getPublicKeyPreambleLength(getStoredAlgOrDefault());
 
         return (short) (basicLen +
                 (short) aaguid.length + // aaguid
                 2 + // credential ID length
                 CREDENTIAL_ID_LEN + // credential ID
-                CannedCBOR.PUBLIC_KEY_ALG_PREAMBLE.length + // preamble for cred public key
+                publicKeyPreambleLen + // preamble for cred public key
                 KEY_POINT_LENGTH + // x-point
                 3 + // CBOR bytes to introduce the y-point
                 KEY_POINT_LENGTH + // y-point
@@ -1909,6 +1967,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                               final short firstCredIdx) {
         short readIdx = 1;
 
+        transientStorage.clearSelectedAlgAndCurve();
 
         // These allocations might need to persist until next time, when we get a GetNextAssertion call
         // If we ARE a getNextAssertion call, we're just re-getting their indices into existing storage...
@@ -2239,6 +2298,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                         numMatchesThisRP++;
 
                         // First load the decrypted private key, then overwrite with the public credential
+                        prepareAttesterForAlg(apdu, getStoredAlgOrDefault());
                         loadScratchIntoAttester(credStorageBuffer, (short)(credStorageOffset + RP_HASH_LEN));
                         Util.arrayCopyNonAtomic(buffer, credIdx,
                                 credStorageBuffer, credStorageOffset, credLen);
@@ -2277,6 +2337,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                     if (rkMatch == -1) {
                         rkMatch = i;
                         potentialAssertionIterationPointer = (byte) (i + 1);
+                        prepareAttesterForAlg(apdu, getStoredAlgOrDefault());
                         loadScratchIntoAttester(credTempBuffer, (short)(credTempOffset + RP_HASH_LEN));
 
                         Util.arrayCopyNonAtomic(residentKeys[i].getEncryptedCredentialID(), (short) 0,
@@ -2559,6 +2620,190 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         P256Constants.setCurve(ecPrivateKey);
         ecPrivateKey.setS(buffer, offset, (short) 32);
         attester.init(ecPrivateKey, Signature.MODE_SIGN);
+    }
+
+    private short getSupportedAlgByIndex(byte idx) {
+        switch (idx) {
+            case 0:
+                return COSE_ALG_ES256;
+            case 1:
+                return COSE_ALG_ES384;
+            case 2:
+                return COSE_ALG_ES512;
+            default:
+                return COSE_ALG_ES256;
+        }
+    }
+
+    private boolean isSupportedAlg(short coseAlg) {
+        if (coseAlg != COSE_ALG_ES256 && coseAlg != COSE_ALG_ES384 && coseAlg != COSE_ALG_ES512) {
+            return false;
+        }
+        return getECSig(coseAlg) != null;
+    }
+
+    private boolean isSupportedCurve(byte curve) {
+        return curve == COSE_CRV_P256;
+    }
+
+    private byte deriveCurveFromAlg(short coseAlg) {
+        // Only P256 is supported for now
+        return COSE_CRV_P256;
+    }
+
+    private short getStoredAlgOrDefault() {
+        if (transientStorage.hasSelectedAlgAndCurve()) {
+            final short storedAlg = transientStorage.getSelectedAlg();
+            if (isSupportedAlg(storedAlg)) {
+                return storedAlg;
+            }
+        }
+        return COSE_ALG_ES256;
+    }
+
+    private byte getStoredCurveOrDefault() {
+        if (transientStorage.hasSelectedAlgAndCurve()) {
+            final byte storedCurve = transientStorage.getSelectedCurve();
+            if (isSupportedCurve(storedCurve)) {
+                return storedCurve;
+            }
+        }
+        return COSE_CRV_P256;
+    }
+
+    private void storeAlgAndCurveFromCredential(byte[] credentialBuffer, short credentialOffset) {
+        if (transientStorage.hasSelectedAlgAndCurve()) {
+            return;
+        }
+        final short metaOffset = (short) (credentialOffset + RP_HASH_LEN + KEY_POINT_LENGTH + 1);
+        short storedAlg = Util.getShort(credentialBuffer, (short) (metaOffset + 1));
+        byte storedCurve = credentialBuffer[metaOffset];
+        if (!isSupportedAlg(storedAlg)) {
+            storedAlg = COSE_ALG_ES256;
+        }
+        if (!isSupportedCurve(storedCurve)) {
+            storedCurve = deriveCurveFromAlg(storedAlg);
+        }
+        transientStorage.setSelectedAlgAndCurve(storedAlg, storedCurve);
+    }
+
+    private byte getEncodedIntLength(short value) {
+        if (value >= 0) {
+            return (byte) (value < 24 ? 1 : 2);
+        }
+        short magnitude = (short) (-1 - value);
+        if (magnitude < 24) {
+            return 1;
+        }
+        if (magnitude <= 0x00FF) {
+            return 2;
+        }
+        return 3;
+    }
+
+    private short encodeCborInt(byte[] outBuf, short writeIdx, short value) {
+        if (value >= 0) {
+            if (value < 24) {
+                outBuf[writeIdx++] = (byte) value;
+            } else {
+                outBuf[writeIdx++] = 0x18;
+                outBuf[writeIdx++] = (byte) value;
+            }
+            return writeIdx;
+        }
+
+        short magnitude = (short) (-1 - value);
+        if (magnitude < 24) {
+            outBuf[writeIdx++] = (byte) (0x20 | magnitude);
+        } else if (magnitude <= 0x00FF) {
+            outBuf[writeIdx++] = 0x38;
+            outBuf[writeIdx++] = (byte) magnitude;
+        } else {
+            outBuf[writeIdx++] = 0x39;
+            writeIdx = Util.setShort(outBuf, writeIdx, magnitude);
+        }
+        return writeIdx;
+    }
+
+    private short getPublicKeyPreambleLength(short coseAlg) {
+        return (short) (9 + getEncodedIntLength(coseAlg));
+    }
+
+    private short writePublicKeyPreamble(byte[] outBuf, short writeIdx, short coseAlg, byte coseCurve) {
+        outBuf[writeIdx++] = (byte) 0xA5; // map - five entries
+        outBuf[writeIdx++] = 0x01; // map key: kty
+        outBuf[writeIdx++] = 0x02; // integer (2) - EC2
+        outBuf[writeIdx++] = 0x03; // map key: alg
+        writeIdx = encodeCborInt(outBuf, writeIdx, coseAlg);
+        outBuf[writeIdx++] = 0x20; // map key: crv
+        writeIdx = encodeCborInt(outBuf, writeIdx, coseCurve);
+        outBuf[writeIdx++] = 0x21; // map key: x-point
+        outBuf[writeIdx++] = 0x58; // byte string with one-byte length next
+        outBuf[writeIdx++] = (byte) KEY_POINT_LENGTH; // x length
+        return writeIdx;
+    }
+
+    private short writeAttestationStatementPreamble(byte[] outBuf, short writeIdx, boolean selfAttestation, short coseAlg) {
+        final short start = writeIdx;
+        outBuf[writeIdx++] = 0x03; // map key: attestation statement
+        outBuf[writeIdx++] = (byte) (selfAttestation ? 0xA2 : 0xA3); // map entries
+        outBuf[writeIdx++] = 0x63; // string - three bytes long
+        outBuf[writeIdx++] = 0x61;
+        outBuf[writeIdx++] = 0x6C;
+        outBuf[writeIdx++] = 0x67; // alg
+        writeIdx = encodeCborInt(outBuf, writeIdx, coseAlg);
+        outBuf[writeIdx++] = 0x63; // string: three characters
+        outBuf[writeIdx++] = 0x73;
+        outBuf[writeIdx++] = 0x69;
+        outBuf[writeIdx++] = 0x67; // sig
+        return (short) (writeIdx - start);
+    }
+
+    private byte getAdvertisedAlgCount() {
+        byte count = 0;
+        for (byte i = 0; i < NUM_SUPPORTED_ALGORITHMS; i++) {
+            if (getECSig(getSupportedAlgByIndex(i)) != null) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private short getAlgorithmsEntryLength() {
+        short length = 1; // array header
+        for (byte i = 0; i < NUM_SUPPORTED_ALGORITHMS; i++) {
+            final short coseAlg = getSupportedAlgByIndex(i);
+            if (getECSig(coseAlg) == null) {
+                continue;
+            }
+            length += (short) (21 + getEncodedIntLength(coseAlg));
+        }
+        return length;
+    }
+
+    private short writeAlgorithmsEntry(byte[] buffer, short offset) {
+        buffer[offset++] = (byte) (0x80 + getAdvertisedAlgCount());
+        for (byte i = 0; i < NUM_SUPPORTED_ALGORITHMS; i++) {
+            final short coseAlg = getSupportedAlgByIndex(i);
+            if (getECSig(coseAlg) == null) {
+                continue;
+            }
+            buffer[offset++] = (byte) 0xA2; // map - two entries
+            buffer[offset++] = 0x63; // alg
+            buffer[offset++] = 0x61;
+            buffer[offset++] = 0x6C;
+            buffer[offset++] = 0x67;
+            offset = encodeCborInt(buffer, offset, coseAlg);
+            buffer[offset++] = 0x64; // type
+            buffer[offset++] = 0x74;
+            buffer[offset++] = 0x79;
+            buffer[offset++] = 0x70;
+            buffer[offset++] = 0x65;
+            buffer[offset++] = 0x6A; // public-key length
+            offset = Util.arrayCopyNonAtomic(CannedCBOR.PUBLIC_KEY_TYPE, (short) 0,
+                    buffer, offset, (short) CannedCBOR.PUBLIC_KEY_TYPE.length);
+        }
+        return offset;
     }
 
     /**
@@ -2963,6 +3208,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
             return false;
         }
 
+        storeAlgAndCurveFromCredential(outputBuffer, outputOffset);
         return true;
     }
 
@@ -4059,6 +4305,8 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
             throwException(ISO7816.SW_WRONG_DATA);
         }
 
+        transientStorage.clearSelectedAlgAndCurve();
+
         final short scratchCredHandle = bufferManager.allocate(apdu, CREDENTIAL_PAYLOAD_LEN, BufferManager.NOT_APDU_BUFFER);
         final short scratchCredOffset = bufferManager.getOffsetForHandle(scratchCredHandle);
         final byte[] scratchCredBuffer = bufferManager.getBufferForHandle(apdu, scratchCredHandle);
@@ -4080,6 +4328,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
             throwException(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
         }
 
+        prepareAttesterForAlg(apdu, COSE_ALG_ES256);
         loadScratchIntoAttester(scratchCredBuffer, (short)(scratchCredOffset + RP_HASH_LEN));
 
         final byte flag_byte = 0x01; // User always present
@@ -4138,6 +4387,8 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
             throwException(ISO7816.SW_WRONG_LENGTH);
         }
         final byte[] reqBuffer = fullyReadReq(apdu, lc, amtRead, true);
+
+        transientStorage.clearSelectedAlgAndCurve();
 
         // TODO: handle very long certificates
         short attCertLen = 0;
@@ -4205,6 +4456,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                 adBuffer, adOffset, PUB_KEY_LENGTH);
 
         // AD buffer now contains data to be signed
+        prepareAttesterForAlg(apdu, COSE_ALG_ES256);
         attester.init(attestationKey, Signature.MODE_SIGN);
         final short sigOffset = (short)(1 + PUB_KEY_LENGTH + 1 + CREDENTIAL_ID_LEN + attCertLen);
         final short sigLength = attester.sign(adBuffer, baseAdOffset, (short)(adOffset - baseAdOffset),
@@ -5629,6 +5881,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
 
         final short amountInApduBuf = offset;
 
+        final short algorithmsEntryLen = getAlgorithmsEntryLength();
         final byte approximateKeyCount = getApproximateRemainingKeyCount();
         boolean partiallySent = false;
         if (!longResponse) {
@@ -5642,7 +5895,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         } else {
             // We have an E-APDU, buf there's not room for our response in the outgoing
             // buffer. Write aside.
-            final short remainingAmountToWrite = (short)(CannedCBOR.ES256_ALG_TYPE.length
+            final short remainingAmountToWrite = (short)(algorithmsEntryLen
                     + (approximateKeyCount > 23 ? 2 : 1) // encoded length of approxKeyCount
                     + (minPinLength > 23 ? 2 : 1) // encoded length of minPinLength
                     + 23 // fixed overhead;
@@ -5659,8 +5912,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         offset = encodeIntTo(buffer, offset, (byte) CREDENTIAL_ID_LEN); // 2 bytes = 3
 
         buffer[offset++] = 0x0A; // map key: algorithms: 1 byte = 4
-        offset = Util.arrayCopyNonAtomic(CannedCBOR.ES256_ALG_TYPE, (short) 0,
-                buffer, offset, (short) CannedCBOR.ES256_ALG_TYPE.length); // added separately
+        offset = writeAlgorithmsEntry(buffer, offset);
 
         buffer[offset++] = 0x0B; // map key: maxSerializedLargeBlobArray: 1 byte = 5
         buffer[offset++] = 0x19; // two-byte integer: 1 byte = 6
@@ -6743,8 +6995,41 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
      *
      * @return An elliptic curve signature object suitable for the FIDO2 standard - ECDSA-SHA256
      */
-    private Signature getECSig() {
-         return Signature.getInstance(Signature.ALG_ECDSA_SHA_256, false);
+    private Signature getECSig(short coseAlg) {
+        try {
+            switch (coseAlg) {
+                case COSE_ALG_ES256:
+                    if (attesterES256 == null) {
+                        attesterES256 = Signature.getInstance(Signature.ALG_ECDSA_SHA_256, false);
+                    }
+                    return attesterES256;
+                case COSE_ALG_ES384:
+                    if (attesterES384 == null) {
+                        attesterES384 = Signature.getInstance(Signature.ALG_ECDSA_SHA_384, false);
+                    }
+                    return attesterES384;
+                case COSE_ALG_ES512:
+                    if (attesterES512 == null) {
+                        attesterES512 = Signature.getInstance(Signature.ALG_ECDSA_SHA_512, false);
+                    }
+                    return attesterES512;
+                default:
+                    return null;
+            }
+        } catch (CryptoException e) {
+            return null;
+        }
+    }
+
+    private void prepareAttesterForAlg(APDU apdu, short coseAlg) {
+        attester = getECSig(coseAlg);
+        if (attester == null) {
+            if (apdu != null) {
+                sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_UNSUPPORTED_ALGORITHM);
+            } else {
+                throwException(ISO7816.SW_FUNC_NOT_SUPPORTED);
+            }
+        }
     }
 
     /**
@@ -6994,7 +7279,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         symmetricUnwrapper = getAES();
         sharedSecretWrapper = getAES();
         sharedSecretUnwrapper = getAES();
-        attester = getECSig();
+        prepareAttesterForAlg(null, COSE_ALG_ES256);
         sha256 = MessageDigest.getInstance(MessageDigest.ALG_SHA_256, false);
 
         transientStorage = new TransientStorage();
