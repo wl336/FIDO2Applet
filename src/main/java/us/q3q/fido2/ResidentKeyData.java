@@ -96,6 +96,22 @@ public class ResidentKeyData {
      * The valid length of the credBlob
      */
     private final byte credBlobLen;
+    /**
+     * Algorithm identifier for this credential's public key
+     */
+    private final byte algorithm;
+    /**
+     * Curve identifier for this credential's public key
+     */
+    private final byte curve;
+    /**
+     * Length, in bytes, of the credential's key material
+     */
+    private final short keyLength;
+    /**
+     * Length, in bytes, of the credential's public key data
+     */
+    private final short publicKeyLength;
 
     /**
      * Create a ResidentKeyData instance.
@@ -110,11 +126,14 @@ public class ResidentKeyData {
      * @param credBlobOffset Offset of credBlob within buffer - unused if credBlobLen is zero
      * @param credBlobLen Length of given credBlob to store with the RK
      * @param uniqueRP True if this RK is the (probably) the only one for its RP
+     * @param algorithm Algorithm identifier for the credential's public key
+     * @param curve Curve identifier for the credential's public key
+     * @param keyLength Length, in bytes, of the credential's key material
      */
     public ResidentKeyData(RandomData random, AESKey key, Cipher wrapper,
                            byte[] publicKeyBuffer, short publicKeyOffset, short publicKeyLength,
                            byte[] credBlobBuffer, short credBlobOffset, byte credBlobLen,
-                           boolean uniqueRP) {
+                           boolean uniqueRP, byte algorithm, byte curve, short keyLength) {
         short ivBufferLen = CRED_BLOB_IV_OFFSET;
         if (credBlobLen > 0) {
             ivBufferLen += IV_LEN;
@@ -138,6 +157,10 @@ public class ResidentKeyData {
                 publicKey, (short) 0, publicKeyLength);
 
         this.uniqueRP = uniqueRP;
+        this.algorithm = algorithm;
+        this.curve = curve;
+        this.keyLength = keyLength;
+        this.publicKeyLength = publicKeyLength;
     }
 
     /**
@@ -279,7 +302,7 @@ public class ResidentKeyData {
      */
     public void unpackPublicKey(byte[] targetBuffer, short targetOffset) {
         Util.arrayCopyNonAtomic(publicKey, (short) 0,
-                targetBuffer, targetOffset, (short) publicKey.length);
+                targetBuffer, targetOffset, publicKeyLength);
     }
 
     /**
@@ -324,7 +347,7 @@ public class ResidentKeyData {
      */
     public void emitLargeBlobKey(AESKey key, Cipher wrapper, byte[] targetBuffer, short targetOffset) {
         wrapper.init(key, Cipher.MODE_ENCRYPT, IVs, LARGE_BLOB_IV_OFFSET, IV_LEN);
-        wrapper.doFinal(publicKey, (short) 0, (short) 32,
+        wrapper.doFinal(publicKey, (short) 0, keyLength,
                 targetBuffer, targetOffset);
     }
 
@@ -421,5 +444,41 @@ public class ResidentKeyData {
      */
     public byte getCredBlobLen() {
         return this.credBlobLen;
+    }
+
+    /**
+     * Get the algorithm identifier for this RK's public key
+     *
+     * @return Algorithm identifier encoded as CBOR single-byte integer
+     */
+    public byte getAlgorithm() {
+        return algorithm;
+    }
+
+    /**
+     * Get the curve identifier for this RK's public key
+     *
+     * @return Curve identifier encoded as CBOR single-byte integer
+     */
+    public byte getCurve() {
+        return curve;
+    }
+
+    /**
+     * Get the byte-length of the key material for this RK
+     *
+     * @return Key length in bytes
+     */
+    public short getKeyLength() {
+        return keyLength;
+    }
+
+    /**
+     * Get the byte-length of the stored public key data
+     *
+     * @return Public key length in bytes
+     */
+    public short getPublicKeyLen() {
+        return publicKeyLength;
     }
 }

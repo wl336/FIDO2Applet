@@ -368,6 +368,14 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
      * Resident Keys
      */
     private ResidentKeyData[] residentKeys;
+    /**
+     * Offset of a pending largeBlobKey CBOR entry when streaming responses
+     */
+    private short pendingLBKOffset;
+    /**
+     * Length of a pending largeBlobKey CBOR entry when streaming responses
+     */
+    private short pendingLBKLength;
 
     // Data storage for things other than resident keys
     /**
@@ -656,6 +664,8 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         byte credBlobLen = 0;
         boolean largeBlobKeyRequested = false;
         boolean minPinRequested = false;
+        pendingLBKLength = 0;
+        pendingLBKOffset = 0;
 
         // Consume any remaining parameters
         byte lastMapKey = 0x04;
@@ -968,6 +978,9 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                             apdu, i, scratchRPIDHashBuffer, scratchRPIDHashOffset,
                             scratchCredBuffer, scratchCredOffset, (byte)(pinAuthSuccess ? 3 : 1))) {
                         // This credential matches the RP we're looking at.
+                        if (!residentKeyIsCompatible(i)) {
+                            continue;
+                        }
                         foundRPMatchInRKs = true;
 
                         // ... but it might not match the user ID we're requesting...
@@ -1080,7 +1093,8 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                         random, key, symmetricWrapper,
                         scratchPublicKeyBuffer, (short)(scratchPublicKeyOffset + 1), (short)(KEY_POINT_LENGTH * 2),
                         buffer, credBlobIdx, effectiveCredBlobLen,
-                        uniqueRP
+                        uniqueRP, CannedCBOR.PUBLIC_KEY_ALG_PREAMBLE[4], CannedCBOR.PUBLIC_KEY_ALG_PREAMBLE[6],
+                        KEY_POINT_LENGTH
                 );
                 residentKeys[targetRKSlot].setEncryptedCredential(scratchCredBuffer, scratchCredOffset,
                         CREDENTIAL_ID_LEN, effectiveCPLevel, !lowSecWasUsed);
@@ -1223,23 +1237,28 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                     // How did we get here without making an RK?
                     sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INTEGRITY_FAILURE);
                 }
-                if (outputLen >= (short)(bufferMem.length - 35)) {
+                final short lbkLen = residentKeys[targetRKSlot].getKeyLength();
+                final short encodedLBKLen = (short)(1 + // map key
+                        (lbkLen < 24 ? 1 : (lbkLen < 256 ? 2 : 3)) + lbkLen);
+                if (outputLen >= (short)(bufferMem.length - encodedLBKLen)) {
                     // No room in the buffer with such a huge response payload
                     sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INTEGRITY_FAILURE);
                 }
-                bufferMem[(short)(bufferMem.length - 36)] = 0x05; // map key: largeBlobKey
-                bufferMem[(short)(bufferMem.length - 35)] = 0x58; // array, one-byte length
-                bufferMem[(short)(bufferMem.length - 34)] = (byte) 32; // 32 bytes of LBK
+                pendingLBKOffset = (short)(bufferMem.length - encodedLBKLen);
+                pendingLBKLength = encodedLBKLen;
+                short lbkOffset = pendingLBKOffset;
+                bufferMem[lbkOffset++] = 0x05; // map key: largeBlobKey
+                lbkOffset = encodeIntLenTo(bufferMem, lbkOffset, lbkLen, true);
                 residentKeys[targetRKSlot].emitLargeBlobKey(getAESKeyForExistingRK(targetRKSlot), symmetricWrapper,
-                        bufferMem, (short)(bufferMem.length - 33));
+                        bufferMem, lbkOffset);
             }
         } else if (largeBlobKeyRequested) {
+            final short lbkLen = residentKeys[targetRKSlot].getKeyLength();
             bufferMem[outputLen++] = 0x05; // map key: largeBlobKey
-            bufferMem[outputLen++] = 0x58; // array, one-byte length
-            bufferMem[outputLen++] = (byte) 32; // 32 bytes of LBK
+            outputLen = encodeIntLenTo(bufferMem, outputLen, lbkLen, true);
             residentKeys[targetRKSlot].emitLargeBlobKey(getAESKeyForExistingRK(targetRKSlot), symmetricWrapper,
                     bufferMem, outputLen);
-            outputLen += 32;
+            outputLen += lbkLen;
         }
 
         doSendResponse(apdu, outputLen);
@@ -2272,6 +2291,10 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                         credTempBuffer, credTempOffset, (byte)(pinAuthPerformed ? 3 : 1))) {
                     // Got a resident key hit!
 
+                    if (!residentKeyIsCompatible(i)) {
+                        continue;
+                    }
+
                     numMatchesThisRP++;
 
                     if (rkMatch == -1) {
@@ -2493,11 +2516,12 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
 
         if (providingLBK) {
             outputBuffer[outputIdx++] = 0x07; // map key: largeBlobKey
-            outputIdx = encodeIntLenTo(outputBuffer, outputIdx, (byte) 32, true);
+            final short lbkLen = residentKeys[rkMatch].getKeyLength();
+            outputIdx = encodeIntLenTo(outputBuffer, outputIdx, lbkLen, true);
             residentKeys[rkMatch].emitLargeBlobKey(
                     getAESKeyForExistingRK(rkMatch), symmetricWrapper,
                     outputBuffer, outputIdx);
-            outputIdx += 32;
+            outputIdx += lbkLen;
         }
 
         // After this write, we are done with the credential private key we loaded.
@@ -2523,6 +2547,9 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         for (short i = 0; i < (short) residentKeys.length; i++) {
             if (residentKeys[i] == null) {
                 break;
+            }
+            if (!residentKeyIsCompatible(i)) {
+                continue;
             }
 
             // Byte comparison will suffice, no need to decrypt the RK
@@ -2893,6 +2920,10 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
             return false;
         }
 
+        if (rkNum >= 0 && !residentKeyIsCompatible(rkNum)) {
+            return false;
+        }
+
         hmacSha256(apdu, credentialVerificationKey, (short) 0,
                 credentialBuffer, credentialOffset, (short)(CREDENTIAL_PAYLOAD_LEN + IV_LEN - 14),
                 outputBuffer, outputOffset);
@@ -3008,6 +3039,35 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
     }
 
     /**
+     * Validates that the stored metadata for an RK matches supported key parameters.
+     *
+     * @param rkIndex Index of the RK to check
+     * @return true if the RK's parameters are supported and lengths are as expected
+     */
+    private boolean residentKeyIsCompatible(short rkIndex) {
+        ResidentKeyData rk = residentKeys[rkIndex];
+        if (rk == null) {
+            return false;
+        }
+        if (rk.getAlgorithm() != CannedCBOR.PUBLIC_KEY_ALG_PREAMBLE[4]) {
+            return false;
+        }
+        if (rk.getCurve() != CannedCBOR.PUBLIC_KEY_ALG_PREAMBLE[6]) {
+            return false;
+        }
+        if (rk.getKeyLength() != KEY_POINT_LENGTH) {
+            return false;
+        }
+        if (rk.getPublicKeyLen() != (short)(KEY_POINT_LENGTH * 2)) {
+            return false;
+        }
+        if (rk.getPublicKeyLen() > PUB_KEY_LENGTH) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
      * Sets up state tracking for a chained (long) response to the platform, and sends the appropriate status code.
      * Should only be called after the first packet in the chain is sent.
      *
@@ -3047,7 +3107,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
             totalOutputLen = (short)(totalOutputLen + attestationData.length);
         }
         if (lbk) {
-            totalOutputLen = (short)(totalOutputLen + 35); // 1 byte map key, 2 bytes CBOR array, 32 bytes LBK
+            totalOutputLen = (short)(totalOutputLen + pendingLBKLength); // map key + CBOR blob
         }
 
         short amountFitInBuffer = totalOutputLen;
@@ -3086,10 +3146,10 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                 if (availableForX5C == attestationData.length) {
                     // ... and we still have room for more: let's go send the LBK stuff!
                     short availableForLBK = (short) (amountFitInBuffer - amountFromMem - availableForX5C);
-                    if (availableForLBK > 35) {
-                        availableForLBK = 35;
+                    if (availableForLBK > pendingLBKLength) {
+                        availableForLBK = pendingLBKLength;
                     }
-                    Util.arrayCopyNonAtomic(bufferMem, (short)(bufferMem.length - 36),
+                    Util.arrayCopyNonAtomic(bufferMem, pendingLBKOffset,
                             apduBytes, (short)(amountFromMem + availableForX5C), availableForLBK);
                 }
             }
@@ -4306,8 +4366,12 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                     apduBytes, remainingValidInBufMem, x5crem);
             chunkToWrite -= x5crem;
             if (lbk && chunkToWrite > 0) {
-                Util.arrayCopyNonAtomic(bufferMem, (short)(bufferMem.length - 36 + lbkIdx),
-                        apduBytes, (short)(remainingValidInBufMem + x5crem), chunkToWrite);
+                short lbkRemaining = (short)(pendingLBKLength - lbkIdx);
+                if (lbkRemaining > chunkToWrite) {
+                    lbkRemaining = chunkToWrite;
+                }
+                Util.arrayCopyNonAtomic(bufferMem, (short)(pendingLBKOffset + lbkIdx),
+                        apduBytes, (short)(remainingValidInBufMem + x5crem), lbkRemaining);
             }
         }
         apdu.sendBytes((short) 0, writeSize);
@@ -4834,6 +4898,9 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
             if (Util.arrayCompare(residentKeys[i].getEncryptedCredentialID(), (short) 0,
                     buffer, credIdIdx, CREDENTIAL_ID_LEN) == 0) {
                 // Matching cred.
+                if (!residentKeyIsCompatible(i)) {
+                    continue;
+                }
                 // We need to extract the credential to check that our PIN token WOULD have permission
                 if (permissionsRpId[0] != 0x00) {
                     short scratchExtractedCredHandle = bufferManager.allocate(apdu, CREDENTIAL_PAYLOAD_LEN, BufferManager.ANYWHERE);
@@ -4927,6 +4994,9 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                     buffer, credIdIdx, residentKeys[i].getCredLen()) == 0) {
                 // Found a match! Unfortunately, we need to unpack the credential to check if this PIN token
                 // has permission to delete it...
+                if (!residentKeyIsCompatible(i)) {
+                    continue;
+                }
 
                 final short mainCredHandle = bufferManager.allocate(apdu, CREDENTIAL_PAYLOAD_LEN, BufferManager.NOT_LOWER_APDU);
                 final short mainCredIdx = bufferManager.getOffsetForHandle(mainCredHandle);
@@ -4956,6 +5026,9 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                     for (short otherRKIdx = 0; otherRKIdx < (short) residentKeys.length; otherRKIdx++) {
                         if (otherRKIdx == i) {
                             // we want ANOTHER RK, not this one...
+                            continue;
+                        }
+                        if (!residentKeyIsCompatible(otherRKIdx)) {
                             continue;
                         }
                         if (residentKeys[otherRKIdx] == null) {
@@ -5093,6 +5166,9 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                     rpIdHashBuf, rpIdHashIdx,
                     rpIdHashBuf, credIdIdx, (byte) 3)) {
                 // Cred is for this RP ID, yay.
+                if (!residentKeyIsCompatible(rkIndex)) {
+                    continue;
+                }
 
                 byte matchingCount = 1; // remember to count THIS cred as a match
                 if (startCredIdx == 0) {
@@ -5102,6 +5178,10 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                     for (short otherCredIdx = (short) (rkIndex + 1); otherCredIdx < (short) residentKeys.length; otherCredIdx++) {
                         if (residentKeys[otherCredIdx] == null) {
                             break;
+                        }
+
+                        if (!residentKeyIsCompatible(otherCredIdx)) {
+                            continue;
                         }
 
                         if (checkCredential(
@@ -5157,7 +5237,8 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                 writeOffset = Util.arrayCopyNonAtomic(CannedCBOR.PUBLIC_KEY_ALG_PREAMBLE, (short) 0,
                         outBuf, writeOffset, (short) CannedCBOR.PUBLIC_KEY_ALG_PREAMBLE.length);
 
-                short pkBufHandle = bufferManager.allocate(apdu, PUB_KEY_LENGTH, BufferManager.ANYWHERE);
+                final short pubKeyLen = residentKeys[rkIndex].getPublicKeyLen();
+                short pkBufHandle = bufferManager.allocate(apdu, pubKeyLen, BufferManager.ANYWHERE);
                 byte[] pkBuf = bufferManager.getBufferForHandle(apdu, pkBufHandle);
                 short pkBufIdx = bufferManager.getOffsetForHandle(pkBufHandle);
 
@@ -5165,7 +5246,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                         pkBuf, pkBufIdx);
                 writeOffset = writePubKey(outBuf, writeOffset, pkBuf, pkBufIdx);
 
-                bufferManager.release(apdu, pkBufHandle, PUB_KEY_LENGTH);
+                bufferManager.release(apdu, pkBufHandle, pubKeyLen);
 
                 if (startCredIdx == 0) {
                     outBuf[writeOffset++] = 0x09; // map key: totalCredentials
@@ -5240,6 +5321,9 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
             if (residentKeys[rkIndex1] == null) {
                 break;
             }
+            if (!residentKeyIsCompatible(rkIndex1)) {
+                continue;
+            }
             if (!residentKeys[rkIndex1].isUniqueRP()) {
                 // definitely non-unique (or inactive) RP
                 continue;
@@ -5252,6 +5336,9 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
             for (short rkIndex2 = (short)(rkIndex1 + 1); rkIndex2 < (short) residentKeys.length; rkIndex2++) {
                 if (residentKeys[rkIndex2] == null) {
                     break;
+                }
+                if (!residentKeyIsCompatible(rkIndex2)) {
+                    continue;
                 }
                 if (!residentKeys[rkIndex2].isUniqueRP()) {
                     // definitely non-unique RP
@@ -5303,6 +5390,9 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
             // if a credential is not for a *unique* RP, ignore it - we're enumerating RPs here!
             if (residentKeys[rkIndex] == null) {
                 break;
+            }
+            if (!residentKeyIsCompatible(rkIndex)) {
+                continue;
             }
             if (residentKeys[rkIndex].isUniqueRP()) {
                 // unique RP - use this one!
@@ -5470,6 +5560,8 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
             random.generateData(credentialVerificationKey, (short) 0, (short) credentialVerificationKey.length);
 
             residentKeys = new ResidentKeyData[NUM_RESIDENT_KEY_SLOTS_PER_BATCH];
+            pendingLBKLength = 0;
+            pendingLBKOffset = 0;
             numResidentCredentials = 0;
             numResidentRPs = 0;
 
