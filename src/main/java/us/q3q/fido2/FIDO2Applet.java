@@ -1068,7 +1068,8 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                     effectiveCredBlobLen = 0;
                 }
 
-                final boolean lowSecForRK = USE_LOW_SECURITY_FOR_SOME_RKS && credProtectLevel < 3;
+                final boolean lowSecForRK = (USE_LOW_SECURITY_FOR_SOME_RKS && credProtectLevel < 3)
+                        || LOW_SECURITY_MAXIMUM_COMPLIANCE;
                 final boolean lowSecWasUsed = encodeCredentialID(apdu, (ECPrivateKey) ecKeyPair.getPrivate(),
                         scratchRPIDHashBuffer, scratchRPIDHashOffset,
                         scratchCredBuffer, scratchCredOffset,
@@ -1119,7 +1120,8 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
             }
         } else {
             // Non-resident credProtect Level 3 creds still need to use the high security key (to require PIN auth)
-            final boolean credMayUseLowSecurityForDiscoverable = credProtectLevel < 3;
+            final boolean credMayUseLowSecurityForDiscoverable = credProtectLevel < 3
+                    || LOW_SECURITY_MAXIMUM_COMPLIANCE;
             encodeCredentialID(apdu, (ECPrivateKey) ecKeyPair.getPrivate(),
                     scratchRPIDHashBuffer, scratchRPIDHashOffset,
                     scratchCredBuffer, scratchCredOffset,
@@ -1772,12 +1774,17 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                                        byte[] rpIdHashBuffer, short rpIdHashOffset,
                                        byte[] outBuffer, short outOffset,
                                        short rkNum, boolean lowSecurity, byte credProtectLevel) {
+        final boolean lowSecurityExplicitlyRequested = lowSecurity;
         if (rkNum >= 0 && !USE_LOW_SECURITY_FOR_SOME_RKS) {
             lowSecurity = false;
         }
-        // use low security even for RKs if LOW_SECURITY_MAXIMUM_COMPLIANCE
-        if (LOW_SECURITY_MAXIMUM_COMPLIANCE) {
+        // use low security even for RKs if LOW_SECURITY_MAXIMUM_COMPLIANCE is explicitly requested
+        if (LOW_SECURITY_MAXIMUM_COMPLIANCE && (lowSecurity || credProtectLevel < 3)) {
             lowSecurity = true;
+        }
+        // regardless of anything else, default to the high-sec key for credProtect-level-3 creds unless explicitly requested
+        if (credProtectLevel == 3 && !lowSecurityExplicitlyRequested) {
+            lowSecurity = false;
         }
         // regardless of anything else, opportunistically use the high-sec key for credProtect-level-3 creds
         final byte pinProtocolInUse = transientStorage.getPinProtocolInUse();
@@ -6826,7 +6833,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         // set up parameters
         // first, defaults
         attestationSwitchingEnabled = false;
-        LOW_SECURITY_MAXIMUM_COMPLIANCE = true;
+        LOW_SECURITY_MAXIMUM_COMPLIANCE = false;
         FORCE_ALWAYS_UV = false;
         USE_LOW_SECURITY_FOR_SOME_RKS = true;
         PROTECT_AGAINST_MALICIOUS_RESETS = false;
