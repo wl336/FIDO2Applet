@@ -211,6 +211,40 @@ class CredProtectTestCase(CTAPTestCase):
                                      'up': False
                                  })
 
+    def test_credprotect_three_creation_requires_pin_when_pin_set(self):
+        pin = secrets.token_hex(8)
+        ClientPin(self.ctap2).set_pin(pin)
+
+        params = dict(self.basic_makecred_params)
+        params['extensions'] = {
+            "credProtect": CredProtectExtension.POLICY.REQUIRED
+        }
+
+        with self.assertRaises(CtapError) as e:
+            self.ctap2.make_credential(**params)
+
+        self.assertEqual(CtapError.ERR.PIN_REQUIRED, e.exception.code)
+
+
+class MaximumComplianceCredProtectTestCase(CredProtectTestCase):
+    def setUp(self, install_params=None) -> None:
+        if install_params is None:
+            install_params = bytes([0xA2, 0x00, 0xF5, 0x01, 0xF5])
+        super().setUp(install_params=install_params)
+
+    def test_level_three_can_use_low_security_when_explicitly_enabled(self):
+        pin = secrets.token_hex(8)
+        ClientPin(self.ctap2).set_pin(pin)
+
+        params = dict(self.basic_makecred_params)
+        params['extensions'] = {
+            "credProtect": CredProtectExtension.POLICY.REQUIRED
+        }
+
+        res = self.ctap2.make_credential(**params)
+        self.assertEqual(CredProtectExtension.POLICY.REQUIRED,
+                         res.auth_data.extensions.get('credProtect'))
+
 
 class CredProtectDeletionTestCase(CredManagementBaseTestCase):
     @parameterized.expand([
