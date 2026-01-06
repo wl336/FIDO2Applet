@@ -46,6 +46,10 @@ public class ResidentKeyData {
     private static final short CRED_BLOB_IV_OFFSET = LARGE_BLOB_IV_OFFSET + IV_LEN;
 
     /**
+     * Curve parameters for this credential
+     */
+    private final CurveParameters curveParameters;
+    /**
      * Encrypted-as-usual credential ID field, just like we'd receive in incoming blocks
      * from the platform if they were non-resident
      */
@@ -111,10 +115,11 @@ public class ResidentKeyData {
      * @param credBlobLen Length of given credBlob to store with the RK
      * @param uniqueRP True if this RK is the (probably) the only one for its RP
      */
-    public ResidentKeyData(RandomData random, AESKey key, Cipher wrapper,
-                           byte[] publicKeyBuffer, short publicKeyOffset, short publicKeyLength,
+    public ResidentKeyData(RandomData random, AESKey key, Cipher wrapper, CurveParameters curveParameters,
+                           byte[] publicKeyBuffer, short publicKeyOffset,
                            byte[] credBlobBuffer, short credBlobOffset, byte credBlobLen,
                            boolean uniqueRP) {
+        this.curveParameters = curveParameters;
         short ivBufferLen = CRED_BLOB_IV_OFFSET;
         if (credBlobLen > 0) {
             ivBufferLen += IV_LEN;
@@ -133,9 +138,9 @@ public class ResidentKeyData {
             this.credBlobLen = 0;
         }
 
-        publicKey = new byte[publicKeyLength];
+        publicKey = new byte[curveParameters.getPublicKeyXYLength()];
         Util.arrayCopyNonAtomic(publicKeyBuffer, publicKeyOffset,
-                publicKey, (short) 0, publicKeyLength);
+                publicKey, (short) 0, curveParameters.getPublicKeyXYLength());
 
         this.uniqueRP = uniqueRP;
     }
@@ -152,6 +157,9 @@ public class ResidentKeyData {
     public void setEncryptedCredential(byte[] credBuffer, short credOffset, short credLen, byte credProtectLevel, boolean highSecEncrypted) {
         if (credential != null) {
             ISOException.throwIt(ISO7816.SW_COMMAND_NOT_ALLOWED);
+        }
+        if (credLen != curveParameters.getCredentialIdLength()) {
+            ISOException.throwIt(ISO7816.SW_DATA_INVALID);
         }
         this.credential = new byte[credLen];
         Util.arrayCopy(credBuffer, credOffset,
@@ -324,7 +332,7 @@ public class ResidentKeyData {
      */
     public void emitLargeBlobKey(AESKey key, Cipher wrapper, byte[] targetBuffer, short targetOffset) {
         wrapper.init(key, Cipher.MODE_ENCRYPT, IVs, LARGE_BLOB_IV_OFFSET, IV_LEN);
-        wrapper.doFinal(publicKey, (short) 0, (short) 32,
+        wrapper.doFinal(publicKey, (short) 0, curveParameters.getKeyLength(),
                 targetBuffer, targetOffset);
     }
 
@@ -335,6 +343,15 @@ public class ResidentKeyData {
      */
     public byte[] getEncryptedCredentialID() {
         return credential;
+    }
+
+    /**
+     * Get the curve parameters used to build this credential.
+     *
+     * @return Curve parameters instance
+     */
+    public CurveParameters getCurveParameters() {
+        return curveParameters;
     }
 
     /**
