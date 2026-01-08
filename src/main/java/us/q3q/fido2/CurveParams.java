@@ -17,7 +17,8 @@ public final class CurveParams {
     private static final short CREDENTIAL_IV_LEN = 16;
     private static final short CREDENTIAL_HMAC_LEN = 16;
     private static final short CREDENTIAL_FLAG_LEN = 1;
-    private static final short CREDENTIAL_PAD_LEN = 15;
+    private static final short CREDENTIAL_METADATA_LEN = 2;
+    private static final short CREDENTIAL_PAD_LEN = 13;
 
     private static final CurveParams P256 = new CurveParams(
             (short) 32,
@@ -49,7 +50,8 @@ public final class CurveParams {
         this.keyLength = keyLength;
         this.keyBits = keyBits;
         this.pubKeyLength = pubKeyLength;
-        this.credentialPayloadLength = (short) (RP_HASH_LEN + keyLength + CREDENTIAL_FLAG_LEN + CREDENTIAL_PAD_LEN);
+        this.credentialPayloadLength = (short) (RP_HASH_LEN + keyLength + CREDENTIAL_FLAG_LEN
+                + CREDENTIAL_METADATA_LEN + CREDENTIAL_PAD_LEN);
         this.credentialIdLength = (short) (credentialPayloadLength + CREDENTIAL_IV_LEN + CREDENTIAL_HMAC_LEN);
         this.coseCurveId = coseCurveId;
         this.coseAlgId = coseAlgId;
@@ -87,6 +89,10 @@ public final class CurveParams {
 
     short getCredentialIdLength() {
         return credentialIdLength;
+    }
+
+    static short getCredentialMetadataLength() {
+        return CREDENTIAL_METADATA_LEN;
     }
 
     short getCoseCurveId() {
