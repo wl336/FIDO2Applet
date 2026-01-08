@@ -303,6 +303,10 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
      */
     private KeyPair ecKeyPair;
     /**
+     * Whether the per-credential keypair should prefer transient storage.
+     */
+    private boolean ecPairInRam;
+    /**
      * Used for CTAP2 "basic" attestation, and for CTAP1/U2F
      */
     private ECPrivateKey attestationKey;
@@ -919,6 +923,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         // Done getting params - make a keypair. You know, what we're supposed to do in this function?
         // Well, we're getting to it, only 150 lines in.
         // We sometimes reset the private key, which clears its curve data, so reset that here
+        ensureCredentialKeyPair(makeCredCurveParams);
         applyCurveParams(makeCredCurveParams,
                 (ECPrivateKey) ecKeyPair.getPrivate(),
                 (ECPublicKey) ecKeyPair.getPublic());
@@ -4303,6 +4308,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         bufferManager.informAPDUBufferAvailability(apdu, (short) 0xFF);
 
         // Create key pair
+        ensureCredentialKeyPair(RESIDENT_KEY_CURVE_PARAMS);
         applyCurveParams(RESIDENT_KEY_CURVE_PARAMS,
                 (ECPrivateKey) ecKeyPair.getPrivate(),
                 (ECPublicKey) ecKeyPair.getPublic());
@@ -6891,23 +6897,27 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
      * @return An uninitialized EC private key, ideally in RAM, but in flash if the authenticator doesn't support in-memory
      */
     private ECPrivateKey getECPrivKey(boolean forceAllowTransient, boolean allowDeselectMemory) {
+        return getECPrivKey(forceAllowTransient, allowDeselectMemory, KeyBuilder.LENGTH_EC_FP_256);
+    }
+
+    private ECPrivateKey getECPrivKey(boolean forceAllowTransient, boolean allowDeselectMemory, short keyLength) {
         if (forceAllowTransient) {
             if (allowDeselectMemory) {
                 try {
-                    return (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE_TRANSIENT_DESELECT, KeyBuilder.LENGTH_EC_FP_256, false);
+                    return (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE_TRANSIENT_DESELECT, keyLength, false);
                 } catch (CryptoException e) {
                     // Oh well, unsupported, use normal RAM or flash instead
                 }
             }
 
             try {
-                return (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE_TRANSIENT_RESET, KeyBuilder.LENGTH_EC_FP_256, false);
+                return (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE_TRANSIENT_RESET, keyLength, false);
             } catch (CryptoException e) {
                 // Oh well, unsupported, use flash instead
             }
         }
 
-        return (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE, KeyBuilder.LENGTH_EC_FP_256, false);
+        return (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE, keyLength, false);
     }
 
     /**
@@ -7138,7 +7148,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         final short availableMem = JCSystem.getAvailableMemory(JCSystem.MEMORY_TYPE_TRANSIENT_DESELECT);
 
         boolean authenticatorKeyInRam = availableMem >= 148; // 96 (desired scratch)+6 (overhead)+32 (key)+16 (params)
-        boolean ecPairInRam = availableMem >= 180; // 148 + 32 (key)
+        ecPairInRam = availableMem >= 180; // 148 + 32 (key)
 
         initAuthenticatorKey(authenticatorKeyInRam);
         initCredKey(ecPairInRam);
@@ -7164,13 +7174,45 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
      * @param ecPairInRam If true, try to place the private key in transient memory
      */
     private void initCredKey(boolean ecPairInRam) {
-        // RAM usage - (ideally) ephemeral keys
-        ecKeyPair = new KeyPair(
-                (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, KeyBuilder.LENGTH_EC_FP_256, false),
-                getECPrivKey(ecPairInRam, true)
+        ecKeyPair = buildCredentialKeyPair(RESIDENT_KEY_CURVE_PARAMS, ecPairInRam);
+    }
+
+    private short getKeyBuilderLength(CurveParams params) {
+        short keyBits = params.getKeyBits();
+        if (keyBits == 256) {
+            return KeyBuilder.LENGTH_EC_FP_256;
+        }
+        if (keyBits == 384) {
+            return KeyBuilder.LENGTH_EC_FP_384;
+        }
+        if (keyBits == 521) {
+            return KeyBuilder.LENGTH_EC_FP_521;
+        }
+        throwException(ISO7816.SW_DATA_INVALID);
+        return KeyBuilder.LENGTH_EC_FP_256;
+    }
+
+    private KeyPair buildCredentialKeyPair(CurveParams params, boolean ecPairInRam) {
+        short keyLength = getKeyBuilderLength(params);
+        KeyPair keyPair = new KeyPair(
+                (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, keyLength, false),
+                getECPrivKey(ecPairInRam, true, keyLength)
         );
-        P256Constants.setCurve((ECKey) ecKeyPair.getPrivate());
-        P256Constants.setCurve((ECKey) ecKeyPair.getPublic());
+        applyCurveParams(params,
+                (ECPrivateKey) keyPair.getPrivate(),
+                (ECPublicKey) keyPair.getPublic());
+        return keyPair;
+    }
+
+    private void ensureCredentialKeyPair(CurveParams params) {
+        if (ecKeyPair == null) {
+            ecKeyPair = buildCredentialKeyPair(params, ecPairInRam);
+            return;
+        }
+        short keySize = ((ECKey) ecKeyPair.getPrivate()).getSize();
+        if (keySize != params.getKeyBits()) {
+            ecKeyPair = buildCredentialKeyPair(params, ecPairInRam);
+        }
     }
 
     /**
