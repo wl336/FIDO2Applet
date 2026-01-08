@@ -61,6 +61,14 @@ public final class CurveParams {
         return null;
     }
 
+    short getKeyLength() {
+        return keyLength;
+    }
+
+    short getPubKeyLength() {
+        return pubKeyLength;
+    }
+
     static CurveParams forKeyLength(short keyLen) {
         if (keyLen == P256.keyLength) {
             return P256;
