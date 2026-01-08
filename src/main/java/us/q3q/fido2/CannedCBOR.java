@@ -213,6 +213,30 @@ public abstract class CannedCBOR {
                             0x70, 0x75, 0x62, 0x6C, 0x69, 0x63, 0x2D, 0x6B, 0x65, 0x79, // public-key
     };
 
+    static final byte[] ES384_ALG_TYPE = {
+            (byte) 0x81, // array - one item
+                (byte) 0xA2, // map - two entries
+                    0x63, // string - three bytes long
+                        0x61, 0x6C, 0x67, // alg
+                        0x38, 0x22, // -35 (alg ID for ES384)
+                    0x64, // string - four bytes long
+                        0x74, 0x79, 0x70, 0x65, // type
+                        0x6A, // string - ten bytes long
+                            0x70, 0x75, 0x62, 0x6C, 0x69, 0x63, 0x2D, 0x6B, 0x65, 0x79, // public-key
+    };
+
+    static final byte[] ES512_ALG_TYPE = {
+            (byte) 0x81, // array - one item
+                (byte) 0xA2, // map - two entries
+                    0x63, // string - three bytes long
+                        0x61, 0x6C, 0x67, // alg
+                        0x38, 0x23, // -36 (alg ID for ES512)
+                    0x64, // string - four bytes long
+                        0x74, 0x79, 0x70, 0x65, // type
+                        0x6A, // string - ten bytes long
+                            0x70, 0x75, 0x62, 0x6C, 0x69, 0x63, 0x2D, 0x6B, 0x65, 0x79, // public-key
+    };
+
     static final byte[] INITIAL_LARGE_BLOB_ARRAY = { // magic hashed encoded empty CBOR array
             (byte) 0x80, 0x76, (byte) 0xBE, (byte) 0x8B,
             0x52, (byte) 0x8D, 0x00, 0x75, (byte) 0xF7,
