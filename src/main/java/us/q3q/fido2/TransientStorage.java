@@ -57,9 +57,13 @@ public final class TransientStorage {
      */
     private static final byte IDX_BOOLEAN_OMNIBUS = 13; // 1 byte
     /**
+     * Requested COSE algorithm for getAssertion (short)
+     */
+    private static final byte IDX_ASSERT_REQUESTED_ALG = 14; // 2 bytes
+    /**
      * How many bytes long the temp storage should be
      */
-    private static final byte NUM_RESET_BYTES = 14;
+    private static final byte NUM_RESET_BYTES = 16;
 
     // boolean bit indices held in BOOLEAN_OMNIBUS byte above
     /**
@@ -177,6 +181,15 @@ public final class TransientStorage {
 
     public void clearAssertIterationPointer() {
         tempBytes[IDX_ASSERT_ITERATION_POINTER] = 0;
+        Util.setShort(tempBytes, IDX_ASSERT_REQUESTED_ALG, (short) 0);
+    }
+
+    public void setAssertRequestedAlg(short alg) {
+        Util.setShort(tempBytes, IDX_ASSERT_REQUESTED_ALG, alg);
+    }
+
+    public short getAssertRequestedAlg() {
+        return Util.getShort(tempBytes, IDX_ASSERT_REQUESTED_ALG);
     }
 
     public short getChainIncomingReadOffset() {
