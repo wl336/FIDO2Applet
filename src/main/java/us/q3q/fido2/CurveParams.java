@@ -69,6 +69,22 @@ public final class CurveParams {
         return pubKeyLength;
     }
 
+    short getCredentialPayloadLength() {
+        return credentialPayloadLength;
+    }
+
+    short getCredentialIdLength() {
+        return credentialIdLength;
+    }
+
+    short getCoseCurveId() {
+        return coseCurveId;
+    }
+
+    short getCoseAlgId() {
+        return coseAlgId;
+    }
+
     static CurveParams forKeyLength(short keyLen) {
         if (keyLen == P256.keyLength) {
             return P256;
