@@ -37,6 +37,10 @@ if __name__ == '__main__':
     parser.add_argument('--country',
                         default='US',
                         help='ISO country code to use for certificates')
+    parser.add_argument('--curve',
+                        choices=['p256', 'p384', 'p521'],
+                        default='p256',
+                        help='Elliptic curve to use for the attestation key')
     parser.add_argument('--already-loaded-public-key',
                         help='The private key is already loaded on the card; this is the base64 DER-encoded PUBLIC key')
     args = parser.parse_args()
@@ -76,14 +80,21 @@ if __name__ == '__main__':
         "country": args.country
     }
 
+    curve_map = {
+        'p256': ec.SECP256R1(),
+        'p384': ec.SECP384R1(),
+        'p521': ec.SECP521R1(),
+    }
+    curve = curve_map[args.curve]
+
     if args.already_loaded_public_key is None:
-        private_key = ec.generate_private_key(ec.SECP256R1())
+        private_key = ec.generate_private_key(curve)
         get_certs_args['private_key'] = private_key
     else:
         private_key = None
         public_key = base64.b64decode(args.already_loaded_public_key)
         get_certs_args['public_key'] = ec.EllipticCurvePublicKey.from_encoded_point(
-            ec.SECP256R1(),
+            curve,
             public_key
         )
         print("Using existing public key " + str(binascii.hexlify(public_key)))

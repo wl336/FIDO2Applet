@@ -15,7 +15,7 @@ from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives._serialization import Encoding
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicKey, EllipticCurvePrivateKey
+from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicKey, EllipticCurvePrivateKey, EllipticCurve
 from fido2.client import UserInteraction, Fido2Client, _Ctap2ClientBackend
 from fido2.cose import ES256
 from fido2.ctap import CtapDevice
@@ -482,6 +482,13 @@ class BasicAttestationTestCase(CTAPTestCase):
     def _short_to_bytes(self, b: int) -> list[int]:
         return [(b & 0xFF00) >> 8, b & 0x00FF]
 
+    def _hash_for_key(self, key: EllipticCurvePrivateKey) -> hashes.HashAlgorithm:
+        if key.key_size <= 256:
+            return hashes.SHA256()
+        if key.key_size <= 384:
+            return hashes.SHA384()
+        return hashes.SHA512()
+
     def gen_authenticator_cert_from_ca(self, name: str,
                                        ca_name: x509.Name,
                                        ca_privkey: EllipticCurvePrivateKey,
@@ -512,16 +519,16 @@ class BasicAttestationTestCase(CTAPTestCase):
             #    x509.ObjectIdentifier("1.3.6.1.4.1.45724.1.1.4"),
             #    value= < DER bytes >
             # ))
-            .sign(private_key=ca_privkey, algorithm=hashes.SHA256())
+            .sign(private_key=ca_privkey, algorithm=self._hash_for_key(ca_privkey))
             .public_bytes(Encoding.DER)
         )
 
         return authenticator_cert_bytes
 
-    def get_ca_cert(self, org: str) -> tuple[bytes, bytes]:
+    def get_ca_cert(self, org: str, curve: EllipticCurve = ec.SECP256R1()) -> tuple[bytes, bytes]:
         now = datetime.now()
 
-        ca_privkey = ec.generate_private_key(ec.SECP256R1())
+        ca_privkey = ec.generate_private_key(curve)
         ca_pubkey = ca_privkey.public_key()
         self.ca_public_key = ca_pubkey
 
@@ -537,7 +544,7 @@ class BasicAttestationTestCase(CTAPTestCase):
             .public_key(ca_pubkey)
             .not_valid_before(now - timedelta(days=1))
             .not_valid_after(now + timedelta(days=3650))
-            .sign(private_key=ca_privkey, algorithm=hashes.SHA256())
+            .sign(private_key=ca_privkey, algorithm=self._hash_for_key(ca_privkey))
             .public_bytes(Encoding.DER)
         )
 
@@ -557,7 +564,7 @@ class BasicAttestationTestCase(CTAPTestCase):
             name = secrets.token_hex(4)
 
         if ca_privkey_and_cert is None:
-            ca_privkey_and_cert = self.get_ca_cert(org)
+            ca_privkey_and_cert = self.get_ca_cert(org, curve=self.public_key.curve)
 
         ca_privkey, ca_cert_bytes = ca_privkey_and_cert
 
@@ -574,7 +581,7 @@ class BasicAttestationTestCase(CTAPTestCase):
 
         return [authenticator_cert_bytes, ca_cert_bytes]
 
-    def assemble_cbor_from_attestation_certs(self, private_key: Optional[bytes], cert_bytes: list[bytes],
+    def assemble_cbor_from_attestation_certs(self, private_key: Optional[EllipticCurvePrivateKey], cert_bytes: list[bytes],
                                              aaguid: bytes) -> bytes:
         num_certs = len(cert_bytes)
         self.cert = cert_bytes[0]
@@ -595,8 +602,7 @@ class BasicAttestationTestCase(CTAPTestCase):
 
         if private_key is not None:
             s = private_key.private_numbers().private_value
-            private_bytes = s.to_bytes(length=32, byteorder='big')
-            self.assertEqual(32, len(private_bytes))
+            private_bytes = s.to_bytes(length=(private_key.key_size + 7) // 8, byteorder='big')
         else:
             private_bytes = bytes()
         cbor_len_bytes = bytes(self._short_to_bytes(len(cert_cbor)))

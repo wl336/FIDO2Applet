@@ -46,7 +46,7 @@ if __name__ == '__main__':
     parser.add_argument('--certification-level', type=int, default=None,
                         help="Obtained FIDO Alliance certification level")
     parser.add_argument('--attestation-private-key',
-                        help="Base64-encoded RAW (32 byte) private key for attestation certificate. Implies --enable-attestation")
+                        help="Base64-encoded RAW (32, 48, or 66 byte) private key for attestation certificate. Implies --enable-attestation")
 
     args = parser.parse_args()
 
@@ -65,6 +65,8 @@ if __name__ == '__main__':
     if args.attestation_private_key is not None:
         args.enable_attestation = True
         args.attestation_private_key = base64.b64decode(args.attestation_private_key)
+        if len(args.attestation_private_key) not in (32, 48, 66):
+            parser.error("Attestation private key must be 32, 48, or 66 bytes long")
 
     num_options_set = 0
     install_param_bytes = []
