@@ -6756,6 +6756,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
      */
     private short consumeKeyAgreement(APDU apdu, byte[] buffer, short readIdx, byte pinProtocol,
                                       short lc) {
+        final short keyAgreementKeyLen = RESIDENT_KEY_CURVE_PARAMS.getKeyLength();
         if (buffer[readIdx++] != (byte) 0xA5) { // map, with five entries
             sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_MISSING_PARAMETER);
         }
@@ -7586,7 +7587,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
             ecKeyPair = buildCredentialKeyPair(params, ecPairInRam);
             return;
         }
-        short keySize = ((ECKey) ecKeyPair.getPrivate()).getSize();
+        short keySize = ((Key) ecKeyPair.getPrivate()).getSize();
         if (keySize != params.getKeyBits()) {
             ecKeyPair = buildCredentialKeyPair(params, ecPairInRam);
         }
