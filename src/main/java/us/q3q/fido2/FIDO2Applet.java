@@ -2762,9 +2762,9 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
 
     private short getAlgorithmsHintLength() {
         return (short) (1 // array header
-                + getAlgorithmDescriptorLength((short) -7)
-                + getAlgorithmDescriptorLength((short) -35)
-                + getAlgorithmDescriptorLength((short) -36));
+                + CannedCBOR.ES256_ALG_TYPE.length - 1
+                + CannedCBOR.ES384_ALG_TYPE.length - 1
+                + CannedCBOR.ES512_ALG_TYPE.length - 1);
     }
 
     private short writeAlgorithmDescriptor(byte[] outBuf, short writeIdx, short alg) {
@@ -2787,9 +2787,12 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
 
     private short writeAlgorithmsHint(byte[] outBuf, short writeIdx) {
         outBuf[writeIdx++] = (byte) 0x83; // array - three items
-        writeIdx = writeAlgorithmDescriptor(outBuf, writeIdx, (short) -7);
-        writeIdx = writeAlgorithmDescriptor(outBuf, writeIdx, (short) -35);
-        writeIdx = writeAlgorithmDescriptor(outBuf, writeIdx, (short) -36);
+        writeIdx = Util.arrayCopyNonAtomic(CannedCBOR.ES256_ALG_TYPE, (short) 1,
+                outBuf, writeIdx, (short) (CannedCBOR.ES256_ALG_TYPE.length - 1));
+        writeIdx = Util.arrayCopyNonAtomic(CannedCBOR.ES384_ALG_TYPE, (short) 1,
+                outBuf, writeIdx, (short) (CannedCBOR.ES384_ALG_TYPE.length - 1));
+        writeIdx = Util.arrayCopyNonAtomic(CannedCBOR.ES512_ALG_TYPE, (short) 1,
+                outBuf, writeIdx, (short) (CannedCBOR.ES512_ALG_TYPE.length - 1));
         return writeIdx;
     }
 
