@@ -11,6 +11,7 @@ public final class CurveParams {
     final short credentialIdLength;
     final short coseCurveId;
     final short coseAlgId;
+    final short hashLength;
 
     private static final short RP_HASH_LEN = 32;
     private static final short CREDENTIAL_IV_LEN = 16;
@@ -23,24 +24,28 @@ public final class CurveParams {
             (short) 256,
             (short) 65,
             (short) 1,
-            (short) -7
+            (short) -7,
+            (short) 32
     );
     private static final CurveParams P384 = new CurveParams(
             (short) 48,
             (short) 384,
             (short) 97,
             (short) 2,
-            (short) -35
+            (short) -35,
+            (short) 48
     );
     private static final CurveParams P521 = new CurveParams(
             (short) 66,
             (short) 521,
             (short) 133,
             (short) 3,
-            (short) -36
+            (short) -36,
+            (short) 64
     );
 
-    private CurveParams(short keyLength, short keyBits, short pubKeyLength, short coseCurveId, short coseAlgId) {
+    private CurveParams(short keyLength, short keyBits, short pubKeyLength, short coseCurveId, short coseAlgId,
+                        short hashLength) {
         this.keyLength = keyLength;
         this.keyBits = keyBits;
         this.pubKeyLength = pubKeyLength;
@@ -48,6 +53,7 @@ public final class CurveParams {
         this.credentialIdLength = (short) (credentialPayloadLength + CREDENTIAL_IV_LEN + CREDENTIAL_HMAC_LEN);
         this.coseCurveId = coseCurveId;
         this.coseAlgId = coseAlgId;
+        this.hashLength = hashLength;
     }
 
     static CurveParams forAlgorithm(short alg) {
@@ -89,6 +95,10 @@ public final class CurveParams {
 
     short getCoseAlgId() {
         return coseAlgId;
+    }
+
+    short getHashLength() {
+        return hashLength;
     }
 
     static CurveParams forKeyLength(short keyLen) {
@@ -135,6 +145,17 @@ public final class CurveParams {
         }
         if (P521.credentialPayloadLength > max) {
             max = P521.credentialPayloadLength;
+        }
+        return max;
+    }
+
+    static short getMaxHashLength() {
+        short max = P256.hashLength;
+        if (P384.hashLength > max) {
+            max = P384.hashLength;
+        }
+        if (P521.hashLength > max) {
+            max = P521.hashLength;
         }
         return max;
     }
