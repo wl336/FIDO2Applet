@@ -96,6 +96,10 @@ public class ResidentKeyData {
      * The valid length of the credBlob
      */
     private final byte credBlobLen;
+    /**
+     * Parameters for the elliptic curve used for this resident key
+     */
+    private final CurveParams curveParams;
 
     /**
      * Create a ResidentKeyData instance.
@@ -103,6 +107,7 @@ public class ResidentKeyData {
      * @param random Source of randomness for initialization vectors
      * @param key Key to use for encrypting data inside the RK
      * @param wrapper Cipher for RK encryption
+     * @param curveParams Parameters for the elliptic curve used by this RK
      * @param publicKeyBuffer Buffer containing the public key for this RK's keypair
      * @param publicKeyOffset Offset of the public key within given buffer
      * @param publicKeyLength Length of the public key in bytes
@@ -112,6 +117,7 @@ public class ResidentKeyData {
      * @param uniqueRP True if this RK is the (probably) the only one for its RP
      */
     public ResidentKeyData(RandomData random, AESKey key, Cipher wrapper,
+                           CurveParams curveParams,
                            byte[] publicKeyBuffer, short publicKeyOffset, short publicKeyLength,
                            byte[] credBlobBuffer, short credBlobOffset, byte credBlobLen,
                            boolean uniqueRP) {
@@ -138,6 +144,16 @@ public class ResidentKeyData {
                 publicKey, (short) 0, publicKeyLength);
 
         this.uniqueRP = uniqueRP;
+        this.curveParams = curveParams;
+    }
+
+    /**
+     * Returns the elliptic curve parameters for this resident key.
+     *
+     * @return Curve params associated with this resident key
+     */
+    public CurveParams getCurveParams() {
+        return curveParams;
     }
 
     /**

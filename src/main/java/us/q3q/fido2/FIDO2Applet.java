@@ -141,6 +141,10 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
      */
     private static final short KEY_POINT_LENGTH = 32;
     /**
+     * Elliptic curve parameters for the configured key length
+     */
+    private static final CurveParams RESIDENT_KEY_CURVE_PARAMS = CurveParams.forKeyLength(KEY_POINT_LENGTH);
+    /**
      * Byte length of hashed relying party ID
      */
     private static final short RP_HASH_LEN = 32;
@@ -1078,6 +1082,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
 
                 residentKeys[targetRKSlot] = new ResidentKeyData(
                         random, key, symmetricWrapper,
+                        RESIDENT_KEY_CURVE_PARAMS,
                         scratchPublicKeyBuffer, (short)(scratchPublicKeyOffset + 1), (short)(KEY_POINT_LENGTH * 2),
                         buffer, credBlobIdx, effectiveCredBlobLen,
                         uniqueRP
