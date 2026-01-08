@@ -67,7 +67,14 @@ class CTAPBasicsTestCase(CTAPTestCase):
 
     def test_info_supported_algs_hint(self):
         info = self.ctap2.get_info()
-        self.assertEqual([{'alg': -7, "type": "public-key"}], info.algorithms)
+        self.assertEqual(
+            [
+                {'alg': -7, "type": "public-key"},
+                {'alg': -35, "type": "public-key"},
+                {'alg': -36, "type": "public-key"},
+            ],
+            info.algorithms,
+        )
 
     def test_make_credential_self_attestation(self):
         rp_id = secrets.token_hex(50)
