@@ -576,17 +576,19 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
             sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_MISSING_PARAMETER);
         }
 
+        short clientDataHashLen = -1;
         if (buffer[readIdx++] == 0x58) {
             // one-byte length, then bytestr
-            if (buffer[readIdx++] != CLIENT_DATA_HASH_LEN) {
-                sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
-            }
+            clientDataHashLen = ub(buffer[readIdx++]);
         } else {
             sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_CBOR_UNEXPECTED_TYPE);
         }
 
         short clientDataHashIdx = readIdx;
-        readIdx += CLIENT_DATA_HASH_LEN; // we checked above this is indeed the length of the client data hash
+        if (clientDataHashLen <= 0 || clientDataHashLen > CurveParams.getMaxHashLength()) {
+            sendErrorByte(apdu, FIDOConstants.CTAP1_ERR_INVALID_PARAMETER);
+        }
+        readIdx += clientDataHashLen;
         if (readIdx >= lc) {
             sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INVALID_CBOR);
         }
@@ -651,6 +653,9 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
 
         if (makeCredCurveParams == null) {
             sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_UNSUPPORTED_ALGORITHM);
+        }
+        if (clientDataHashLen != makeCredCurveParams.getHashLength()) {
+            sendErrorByte(apdu, FIDOConstants.CTAP1_ERR_INVALID_PARAMETER);
         }
         final short credentialIdLen = makeCredCurveParams.getCredentialIdLength();
 
@@ -835,7 +840,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
             // Come back and verify PIN auth
             byte pinPermissions = transientStorage.getPinPermissions();
 
-            verifyPinAuth(apdu, buffer, pinAuthIdx, buffer, clientDataHashIdx, pinProtocol, true);
+            verifyPinAuth(apdu, buffer, pinAuthIdx, buffer, clientDataHashIdx, clientDataHashLen, pinProtocol, true);
 
             if ((pinPermissions & FIDOConstants.PERM_MAKE_CREDENTIAL) == 0) {
                 // PIN token doesn't have permission for the MC operation
@@ -1149,11 +1154,11 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         }
 
         // OKAY! time to start actually making the credential and sending a response!
-        final short clientDataHashHandle = bufferManager.allocate(apdu, CLIENT_DATA_HASH_LEN, BufferManager.ANYWHERE);
+        final short clientDataHashHandle = bufferManager.allocate(apdu, clientDataHashLen, BufferManager.ANYWHERE);
         final short clientDataHashScratchOffset = bufferManager.getOffsetForHandle(clientDataHashHandle);
         final byte[] clientDataHashBuffer = bufferManager.getBufferForHandle(apdu, clientDataHashHandle);
         Util.arrayCopyNonAtomic(buffer, clientDataHashIdx,
-                clientDataHashBuffer, clientDataHashScratchOffset, CLIENT_DATA_HASH_LEN);
+                clientDataHashBuffer, clientDataHashScratchOffset, clientDataHashLen);
 
         // Everything we need is out of the input
         // We're now okay to use the whole bufferMem space to build and send our reply
@@ -1194,7 +1199,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
 
         // TEMPORARY copy to build signing buffer
         Util.arrayCopyNonAtomic(clientDataHashBuffer, clientDataHashScratchOffset,
-                bufferMem, outputLen, CLIENT_DATA_HASH_LEN);
+                bufferMem, outputLen, clientDataHashLen);
 
         final short makeCredAlg = makeCredCurveParams.getCoseAlgId();
         final byte[] attestationDataForAlg = getAttestationDataForAlg(makeCredAlg);
@@ -1214,7 +1219,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
             attestationSigner.init(attestationKeyForAlg, Signature.MODE_SIGN);
         }
         final short attestationPreambleLen = getAttestationPreambleLength(makeCredAlg, selfAttestation);
-        final short sigLength = attestationSigner.sign(bufferMem, offsetForStartOfAuthData, (short)(adLen + CLIENT_DATA_HASH_LEN),
+        final short sigLength = attestationSigner.sign(bufferMem, offsetForStartOfAuthData, (short)(adLen + clientDataHashLen),
                 bufferMem, (short) (outputLen + attestationPreambleLen + 2));
 
         // EC key pair COULD be stored in flash (if device doesn't support transient EC privKeys), so might as
@@ -1513,7 +1518,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
      * @param invalidateToken      If true, consider invalidating the PIN token
      */
     private void verifyPinAuth(APDU apdu, byte[] buffer, short readIdx,
-                               byte[] clientDataHashBuffer, short clientDataHashIdx,
+                               byte[] clientDataHashBuffer, short clientDataHashIdx, short clientDataHashLen,
                                byte pinProtocol, boolean invalidateToken) {
         byte desiredLength = 16;
         if (pinProtocol == 2) {
@@ -1551,7 +1556,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
             }
         }
 
-        checkPinToken(apdu, clientDataHashBuffer, clientDataHashIdx, CLIENT_DATA_HASH_LEN,
+        checkPinToken(apdu, clientDataHashBuffer, clientDataHashIdx, clientDataHashLen,
                 buffer, readIdx, pinProtocol, invalidateToken);
     }
 
@@ -2005,7 +2010,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         short scratchRPIDHashHandle = bufferManager.allocate(apdu, RP_HASH_LEN, startingAllowedMemory);
         byte[] scratchRPIDHashBuffer = bufferManager.getBufferForHandle(apdu, scratchRPIDHashHandle);
         short scratchRPIDHashIdx = bufferManager.getOffsetForHandle(scratchRPIDHashHandle);
-        short clientDataHashHandle = bufferManager.allocate(apdu, CLIENT_DATA_HASH_LEN, startingAllowedMemory);
+        short clientDataHashHandle = bufferManager.allocate(apdu, CurveParams.getMaxHashLength(), startingAllowedMemory);
         byte[] clientDataHashBuffer = bufferManager.getBufferForHandle(apdu, clientDataHashHandle);
         short clientDataHashIdx = bufferManager.getOffsetForHandle(clientDataHashHandle);
         // first byte, PIN protocol. Second byte a bitfield:
@@ -2030,6 +2035,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         short allowListLength = 0;
         CurveParams matchedCredParams = null;
         short requestedAlg = transientStorage.getAssertRequestedAlg();
+        short clientDataHashLen = 0;
         boolean algMismatch = false;
 
         if (resetRequested) {
@@ -2085,19 +2091,19 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
             if (buffer[readIdx++] != 0x02) { // clientDataHash
                 sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_MISSING_PARAMETER);
             }
-            short clientDataHashLen = -1;
+            clientDataHashLen = -1;
             if (buffer[readIdx++] == 0x58) {
                 if (readIdx >= lc) {
                     sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INVALID_CBOR);
                 }
                 clientDataHashLen = buffer[readIdx++];
             }
-            if (clientDataHashLen != CLIENT_DATA_HASH_LEN) {
+            if (clientDataHashLen <= 0 || clientDataHashLen > CurveParams.getMaxHashLength()) {
                 sendErrorByte(apdu, FIDOConstants.CTAP1_ERR_INVALID_PARAMETER);
             }
             Util.arrayCopyNonAtomic(buffer, readIdx,
-                    clientDataHashBuffer, clientDataHashIdx, CLIENT_DATA_HASH_LEN);
-            readIdx += CLIENT_DATA_HASH_LEN;
+                    clientDataHashBuffer, clientDataHashIdx, clientDataHashLen);
+            readIdx += clientDataHashLen;
             if (readIdx >= lc) {
                 sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INVALID_CBOR);
             }
@@ -2287,7 +2293,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                 final byte pinPermissions = transientStorage.getPinPermissions();
                 final boolean shouldInvalidatePinToken = transientStorage.hasUPOption();
 
-                verifyPinAuth(apdu, buffer, pinAuthIdx, clientDataHashBuffer, clientDataHashIdx,
+                verifyPinAuth(apdu, buffer, pinAuthIdx, clientDataHashBuffer, clientDataHashIdx, clientDataHashLen,
                         stateKeepingBuffer[stateKeepingIdx], shouldInvalidatePinToken);
 
                 if ((pinPermissions & FIDOConstants.PERM_GET_ASSERTION) == 0) {
@@ -2447,6 +2453,15 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         if (matchedCredParams == null) {
             sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_NO_CREDENTIALS);
         }
+        if (clientDataHashLen == 0) {
+            clientDataHashLen = matchedCredParams.getHashLength();
+        }
+        if (clientDataHashLen != matchedCredParams.getHashLength()) {
+            sendErrorByte(apdu, FIDOConstants.CTAP1_ERR_INVALID_PARAMETER);
+        }
+        if (requestedAlg != 0 && matchedCredParams.getCoseAlgId() != requestedAlg) {
+            sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_UNSUPPORTED_ALGORITHM);
+        }
 
         final byte memPositioning = BufferManager.NOT_APDU_BUFFER;
 
@@ -2590,12 +2605,12 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         // TEMPORARILY copy the clientDataHash into the output buffer so we have a contiguous signing block
         // We'll overwrite it again in a moment, so don't advance the output write index
         Util.arrayCopyNonAtomic(clientDataHashBuffer, clientDataHashIdx,
-                outputBuffer, outputIdx, CLIENT_DATA_HASH_LEN);
+                outputBuffer, outputIdx, clientDataHashLen);
         final Signature assertionSigner = getAttesterForAlg(matchedCredParams.getCoseAlgId());
         if (assertionSigner == null) {
             sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_UNSUPPORTED_ALGORITHM);
         }
-        final short sigLength = assertionSigner.sign(outputBuffer, startOfAD, (short)(adLen + extensionDataLen + CLIENT_DATA_HASH_LEN),
+        final short sigLength = assertionSigner.sign(outputBuffer, startOfAD, (short)(adLen + extensionDataLen + clientDataHashLen),
                 outputBuffer, (short)(outputIdx + 3)); // 3 byte space: map key, byte array type, byte array length
 
         // advance past the signature we just wrote, which overwrote the clientDataHash in the buffer
