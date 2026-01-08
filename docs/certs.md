@@ -5,9 +5,9 @@ CTAP1/U2F functionality (U2F requires attestation certificates). The authenticat
 have a CTAP2 AAGUID of all zeros.
 
 If you instead wish to use CTAP2 Basic Attestation and/or CTAP1, you will need to provide
-an AAGUID, a certificate chain, and a private key before using the applet. Only P256
-certificates (ECDSA) are supported for the authenticator's own certificate; any algorithm
-may be used for CAs further up the chain.
+an AAGUID, a certificate chain, and a private key before using the applet. P-256, P-384,
+and P-521 certificates (ECDSA) are supported for the authenticator's own certificate; any
+algorithm may be used for CAs further up the chain.
 
 These may be provided via a vendor CTAP command (command byte 0x46). In order
 to enable the vendor CTAP command, you must install the applet with parameters enabling it:
@@ -21,7 +21,7 @@ authenticator; once installed, they persist until the applet is deleted, and can
 The syntax for the data to the vendor command is as follows:
 
 1. 16 byte AAGUID
-1. 32 byte ECDSA private key point (aka the S-value)
+1. ECDSA private key point (aka the S-value), 32/48/66 bytes for P-256/P-384/P-521
 1. Two-byte total length of CBOR object following this one
 1. Remaining bytes are a CBOR-encoded array of certificates, with each cert encoded as DER. The
    first certificate in the array must correspond to the authenticator's own key. Note that this
@@ -38,4 +38,5 @@ Advice: keep your certificates *as short as possible*, since the longer they are
 flash you'll use and the slower the makeCredential/register operations will be.
 
 You can install a self-signed certificate easily using the `install_attestation_cert.py` script in
-the repository root.
+the repository root. Use `--curve p384` or `--curve p521` to generate and install keys for those
+curves.

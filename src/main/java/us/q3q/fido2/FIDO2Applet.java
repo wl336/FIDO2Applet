@@ -140,6 +140,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
      * Elliptic curve parameters for resident key use (P-256)
      */
     private static final CurveParams RESIDENT_KEY_CURVE_PARAMS = CurveParams.forKeyLength((short) 32);
+    private static final short[] ATTESTATION_KEY_LENGTHS = {32, 48, 66};
     /**
      * Byte length of hashed relying party ID
      */
@@ -314,10 +315,14 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
     /**
      * Used for CTAP2 "basic" attestation, and for CTAP1/U2F
      */
-    private ECPrivateKey attestationKey;
+    private ECPrivateKey attestationKeyP256;
+    private ECPrivateKey attestationKeyP384;
+    private ECPrivateKey attestationKeyP521;
+    private CurveParams attestationKeyParamsP256;
+    private CurveParams attestationKeyParamsP384;
+    private CurveParams attestationKeyParamsP521;
     /**
      * If set to true, allow loading an attestation certificate.
-     * Will become false after cert installed.
      */
     private boolean attestationSwitchingEnabled;
     /**
@@ -330,6 +335,20 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
      * How much of the attestationData has been successfully read so far
      */
     private short filledAttestationData;
+    /**
+     * The curve parameters for the attestation data currently being loaded.
+     */
+    private CurveParams attestationLoadParams;
+    /**
+     * Cached per-curve attestation certificate chains.
+     */
+    private byte[] attestationDataP256;
+    private byte[] attestationDataP384;
+    private byte[] attestationDataP521;
+    /**
+     * Attestation data to stream for a pending response.
+     */
+    private byte[] streamingAttestationData;
     /**
      * General hashing of stuff
      */
@@ -1177,16 +1196,22 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         Util.arrayCopyNonAtomic(clientDataHashBuffer, clientDataHashScratchOffset,
                 bufferMem, outputLen, CLIENT_DATA_HASH_LEN);
 
-        boolean selfAttestation = attestationKey == null;
         final short makeCredAlg = makeCredCurveParams.getCoseAlgId();
+        final byte[] attestationDataForAlg = getAttestationDataForAlg(makeCredAlg);
+        final ECPrivateKey attestationKeyForAlg = getAttestationKeyForAlg(makeCredAlg);
+        final boolean attestationConfigured = hasAnyAttestationData();
+        final boolean selfAttestation = !attestationConfigured;
         final Signature attestationSigner = getAttesterForAlg(makeCredAlg);
         if (attestationSigner == null) {
+            sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_UNSUPPORTED_ALGORITHM);
+        }
+        if (!selfAttestation && (attestationDataForAlg == null || attestationKeyForAlg == null)) {
             sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_UNSUPPORTED_ALGORITHM);
         }
         if (selfAttestation) {
             attestationSigner.init(ecKeyPair.getPrivate(), Signature.MODE_SIGN);
         } else {
-            attestationSigner.init(attestationKey, Signature.MODE_SIGN);
+            attestationSigner.init(attestationKeyForAlg, Signature.MODE_SIGN);
         }
         final short attestationPreambleLen = getAttestationPreambleLength(makeCredAlg, selfAttestation);
         final short sigLength = attestationSigner.sign(bufferMem, offsetForStartOfAuthData, (short)(adLen + CLIENT_DATA_HASH_LEN),
@@ -1221,6 +1246,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
             // The certificates can be very (VERY) long. So we set up the
             // output delivery to read directly from the X5C buffer.
             transientStorage.setStreamX5CLater(largeBlobKeyRequested);
+            streamingAttestationData = attestationDataForAlg;
             if (largeBlobKeyRequested) {
                 // Unfortunately the large blob key comes after the very long x5c data...
                 // Park the LBK in the upper 32 bytes of bufferMem
@@ -1284,14 +1310,26 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
     private void applyCurveParams(CurveParams params, ECPrivateKey privateKey, ECPublicKey publicKey) {
         short keyLength = params.getKeyLength();
         if (keyLength == 32) {
-            P256Constants.setCurve(privateKey);
-            P256Constants.setCurve(publicKey);
+            if (privateKey != null) {
+                P256Constants.setCurve(privateKey);
+            }
+            if (publicKey != null) {
+                P256Constants.setCurve(publicKey);
+            }
         } else if (keyLength == 48) {
-            P384Constants.setCurve(privateKey);
-            P384Constants.setCurve(publicKey);
+            if (privateKey != null) {
+                P384Constants.setCurve(privateKey);
+            }
+            if (publicKey != null) {
+                P384Constants.setCurve(publicKey);
+            }
         } else if (keyLength == 66) {
-            P521Constants.setCurve(privateKey);
-            P521Constants.setCurve(publicKey);
+            if (privateKey != null) {
+                P521Constants.setCurve(privateKey);
+            }
+            if (publicKey != null) {
+                P521Constants.setCurve(publicKey);
+            }
         } else {
             throwException(ISO7816.SW_DATA_INVALID);
         }
@@ -3303,10 +3341,14 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         final boolean isExtendedAPDU = apdu.getOffsetCdata() == ISO7816.OFFSET_EXT_CDATA;
         final short apduBlockSize = (short)(APDU.getOutBlockSize() - 2);
         final short expectedLen = apdu.setOutgoing();
+        byte[] attestationDataToStream = streamingAttestationData;
 
         short totalOutputLen = outputLen;
         if (x5c) {
-            totalOutputLen = (short)(totalOutputLen + attestationData.length);
+            if (attestationDataToStream == null) {
+                sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_INTEGRITY_FAILURE);
+            }
+            totalOutputLen = (short)(totalOutputLen + attestationDataToStream.length);
         }
         if (lbk) {
             totalOutputLen = (short)(totalOutputLen + 35); // 1 byte map key, 2 bytes CBOR array, 32 bytes LBK
@@ -3339,13 +3381,13 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
             if (amountFromMem < amountFitInBuffer) {
                 // We can send some X5C bytes, too!
                 short availableForX5C = (short) (amountFitInBuffer - amountFromMem);
-                if (availableForX5C > attestationData.length) {
-                    availableForX5C = (short) attestationData.length;
+                if (availableForX5C > attestationDataToStream.length) {
+                    availableForX5C = (short) attestationDataToStream.length;
                 }
-                Util.arrayCopyNonAtomic(attestationData, (short) 0,
+                Util.arrayCopyNonAtomic(attestationDataToStream, (short) 0,
                         apduBytes, amountFromMem, availableForX5C);
 
-                if (availableForX5C == attestationData.length) {
+                if (availableForX5C == attestationDataToStream.length) {
                     // ... and we still have room for more: let's go send the LBK stuff!
                     short availableForLBK = (short) (amountFitInBuffer - amountFromMem - availableForX5C);
                     if (availableForLBK > 35) {
@@ -3366,6 +3408,8 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
             } else {
                 setupChainedResponse(amountFitInBuffer, (short)(totalOutputLen - amountFitInBuffer));
             }
+        } else if (x5c) {
+            streamingAttestationData = null;
         }
     }
 
@@ -4295,7 +4339,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
      * @param p1 Value of the ISO P1 parameter, used to determine if this is a check-only operation
      */
     private void u2FAuthenticate(APDU apdu, byte p1) {
-        if (attestationData == null || filledAttestationData < attestationData.length) {
+        if (getAttestationDataForAlg((short) -7) == null || attestationDataLoading()) {
             // Authenticating requires an attestation certificate!
             throwException(ISO7816.SW_COMMAND_NOT_ALLOWED);
         }
@@ -4385,7 +4429,8 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
      * @param apdu Request/response context object
      */
     private void u2FRegister(APDU apdu) {
-        if (attestationData == null || filledAttestationData < attestationData.length) {
+        final byte[] attestationDataForAlg = getAttestationDataForAlg((short) -7);
+        if (attestationDataForAlg == null || attestationDataLoading()) {
             // Registering requires an attestation certificate!
             throwException(ISO7816.SW_COMMAND_NOT_ALLOWED);
         }
@@ -4404,14 +4449,14 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
 
         // TODO: handle very long certificates
         short attCertLen = 0;
-        byte cborAttLenByte = attestationData[1];
+        byte cborAttLenByte = attestationDataForAlg[1];
         short attCertStart = 2;
         if (cborAttLenByte < 0x57 && cborAttLenByte >= 0x40) {
             attCertLen = (short)(cborAttLenByte - 0x40);
         } else if (cborAttLenByte == 0x58) { // one-byte length
-            attCertLen = ub(attestationData[attCertStart++]);
+            attCertLen = ub(attestationDataForAlg[attCertStart++]);
         } else if (cborAttLenByte == 0x59) { // two-byte length
-            attCertLen = Util.getShort(attestationData, attCertStart);
+            attCertLen = Util.getShort(attestationDataForAlg, attCertStart);
             attCertStart += 2;
         } else {
             throwException(ISO7816.SW_DATA_INVALID);
@@ -4471,7 +4516,11 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                 adBuffer, adOffset, u2fParams.getPubKeyLength());
 
         // AD buffer now contains data to be signed
-        attester.init(attestationKey, Signature.MODE_SIGN);
+        final ECPrivateKey attestationKeyForAlg = getAttestationKeyForAlg((short) -7);
+        if (attestationKeyForAlg == null) {
+            throwException(ISO7816.SW_DATA_INVALID);
+        }
+        attester.init(attestationKeyForAlg, Signature.MODE_SIGN);
         final short sigOffset = (short)(1 + u2fParams.getPubKeyLength() + 1 + u2fParams.getCredentialIdLength() + attCertLen);
         final short sigLength = attester.sign(adBuffer, baseAdOffset, (short)(adOffset - baseAdOffset),
                 bufferMem, sigOffset);
@@ -4488,7 +4537,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         outputLen = Util.arrayCopyNonAtomic(scratchCredBuffer, scratchCredOffset,
                 bufferMem, outputLen, u2fParams.getCredentialIdLength());
 
-        outputLen = Util.arrayCopyNonAtomic(attestationData, attCertStart,
+        outputLen = Util.arrayCopyNonAtomic(attestationDataForAlg, attCertStart,
                 bufferMem, outputLen, attCertLen);
         if (outputLen != sigOffset) {
             throwException(ISO7816.SW_DATA_INVALID);
@@ -4525,6 +4574,9 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         short x5cidx = 0;
         short lbkIdx = 0;
         if (x5c) {
+            if (streamingAttestationData == null) {
+                throwException(ISO7816.SW_DATA_INVALID);
+            }
             remainingValidInBufMem = transientStorage.getStoredIdx();
             if (remainingValidInBufMem > outgoingOffset) {
                 // We still have some reading from bufmem to do
@@ -4534,9 +4586,9 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                 x5cidx = (short)(outgoingOffset - remainingValidInBufMem);
                 remainingValidInBufMem = (short) 0;
 
-                if (x5cidx > attestationData.length) {
-                    lbkIdx = (short)(x5cidx - attestationData.length);
-                    x5cidx = (short) attestationData.length;
+                if (x5cidx > streamingAttestationData.length) {
+                    lbkIdx = (short)(x5cidx - streamingAttestationData.length);
+                    x5cidx = (short) streamingAttestationData.length;
                 }
             }
         }
@@ -4564,11 +4616,14 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
             chunkToWrite -= writeFromBufMem;
         }
         if (x5c && chunkToWrite > 0) {
-            short x5crem = (short)(attestationData.length - x5cidx);
+            if (streamingAttestationData == null) {
+                throwException(ISO7816.SW_DATA_INVALID);
+            }
+            short x5crem = (short)(streamingAttestationData.length - x5cidx);
             if (x5crem > chunkToWrite) {
                 x5crem = chunkToWrite;
             }
-            Util.arrayCopyNonAtomic(attestationData, x5cidx,
+            Util.arrayCopyNonAtomic(streamingAttestationData, x5cidx,
                     apduBytes, remainingValidInBufMem, x5crem);
             chunkToWrite -= x5crem;
             if (lbk && chunkToWrite > 0) {
@@ -4587,6 +4642,9 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                 throwException((short) (ISO7816.SW_BYTES_REMAINING_00 + outgoingRemaining));
             }
             transientStorage.clearOutgoingContinuation();
+        }
+        if (outgoingRemaining == 0) {
+            streamingAttestationData = null;
         }
         return false;
     }
@@ -4636,7 +4694,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         // For U2F compatibility, the CTAP2 standard requires that we respond to select() as if we were a U2F
         // authenticator, and then let the platform figure out we're really CTAP2 by making a getAuthenticatorInfo
         // API request afterwards
-        if (alwaysUv || attestationData == null || filledAttestationData < attestationData.length) {
+        if (alwaysUv || getAttestationDataForAlg((short) -7) == null || attestationDataLoading()) {
             // ... but we DON'T implement U2F with alwaysUv, so we can send the CTAP2-only response type
             sendByteArray(apdu, CannedCBOR.FIDO_2_RESPONSE, (short) CannedCBOR.FIDO_2_RESPONSE.length);
         } else {
@@ -5837,7 +5895,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         buffer[offset++] = (byte) numOptions; // Map - some number of options
         buffer[offset++] = 0x01; // map key: versions
 
-        if (alwaysUv || attestationData == null || filledAttestationData < attestationData.length) {
+        if (alwaysUv || getAttestationDataForAlg((short) -7) == null || attestationDataLoading()) {
             offset = Util.arrayCopyNonAtomic(CannedCBOR.VERSIONS_WITHOUT_U2F, (short) 0,
                     buffer, offset, (short) CannedCBOR.VERSIONS_WITHOUT_U2F.length);
         } else {
@@ -7042,6 +7100,151 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         return null;
     }
 
+    private ECPrivateKey getAttestationKeyForAlg(short alg) {
+        if (alg == -7) {
+            return attestationKeyP256;
+        }
+        if (alg == -35) {
+            return attestationKeyP384;
+        }
+        if (alg == -36) {
+            return attestationKeyP521;
+        }
+        return null;
+    }
+
+    private CurveParams getAttestationParamsForAlg(short alg) {
+        if (alg == -7) {
+            return attestationKeyParamsP256;
+        }
+        if (alg == -35) {
+            return attestationKeyParamsP384;
+        }
+        if (alg == -36) {
+            return attestationKeyParamsP521;
+        }
+        return null;
+    }
+
+    private byte[] getAttestationDataForAlg(short alg) {
+        if (alg == -7) {
+            return attestationDataP256;
+        }
+        if (alg == -35) {
+            return attestationDataP384;
+        }
+        if (alg == -36) {
+            return attestationDataP521;
+        }
+        return null;
+    }
+
+    private boolean hasAnyAttestationData() {
+        return attestationDataP256 != null || attestationDataP384 != null || attestationDataP521 != null;
+    }
+
+    private boolean attestationDataLoading() {
+        return attestationData != null && filledAttestationData < attestationData.length;
+    }
+
+    private void storeAttestationKey(CurveParams params, ECPrivateKey key) {
+        short keyLen = params.getKeyLength();
+        if (keyLen == 32) {
+            attestationKeyP256 = key;
+            attestationKeyParamsP256 = params;
+        } else if (keyLen == 48) {
+            attestationKeyP384 = key;
+            attestationKeyParamsP384 = params;
+        } else if (keyLen == 66) {
+            attestationKeyP521 = key;
+            attestationKeyParamsP521 = params;
+        } else {
+            throwException(ISO7816.SW_DATA_INVALID);
+        }
+    }
+
+    private void storeAttestationData(CurveParams params, byte[] data) {
+        short keyLen = params.getKeyLength();
+        if (keyLen == 32) {
+            attestationDataP256 = data;
+        } else if (keyLen == 48) {
+            attestationDataP384 = data;
+        } else if (keyLen == 66) {
+            attestationDataP521 = data;
+        } else {
+            throwException(ISO7816.SW_DATA_INVALID);
+        }
+    }
+
+    private void finalizeAttestationLoad() {
+        if (attestationLoadParams == null || attestationData == null) {
+            throwException(ISO7816.SW_DATA_INVALID);
+        }
+        storeAttestationData(attestationLoadParams, attestationData);
+        attestationData = null;
+        filledAttestationData = 0;
+        attestationLoadParams = null;
+    }
+
+    private boolean isValidAttestationCbor(byte[] params, short offset) {
+        return (params[offset] & 0xF0) == (byte) 0x80;
+    }
+
+    private short findAttestationKeyLength(byte[] params, short offset, short length) {
+        final short baseOffset = (short) (offset + aaguid.length);
+        for (short i = 0; i < (short) ATTESTATION_KEY_LENGTHS.length; i++) {
+            short keyLen = ATTESTATION_KEY_LENGTHS[i];
+            short certLenOffset = (short) (baseOffset + keyLen);
+            short certStartOffset = (short) (certLenOffset + 2);
+            if (length <= (short) (aaguid.length + keyLen + 2)) {
+                continue;
+            }
+            if ((short) (offset + length) < (short) (certStartOffset + 1)) {
+                continue;
+            }
+            short certLen = Util.getShort(params, certLenOffset);
+            if (length != (short) (aaguid.length + keyLen + 2 + certLen)) {
+                continue;
+            }
+            if (!isValidAttestationCbor(params, certStartOffset)) {
+                continue;
+            }
+            return keyLen;
+        }
+
+        short certLenOffset = baseOffset;
+        short certStartOffset = (short) (certLenOffset + 2);
+        if (length > (short) (aaguid.length + 2)
+                && (short) (offset + length) >= (short) (certStartOffset + 1)) {
+            short certLen = Util.getShort(params, certLenOffset);
+            if (length == (short) (aaguid.length + 2 + certLen)
+                    && isValidAttestationCbor(params, certStartOffset)) {
+                return 0;
+            }
+        }
+        return (short) -1;
+    }
+
+    private CurveParams resolveAttestationParamsForCertOnly() {
+        CurveParams params = null;
+        if (attestationKeyP256 != null) {
+            params = RESIDENT_KEY_CURVE_PARAMS;
+        }
+        if (attestationKeyP384 != null) {
+            if (params != null) {
+                return null;
+            }
+            params = CurveParams.forKeyLength((short) 48);
+        }
+        if (attestationKeyP521 != null) {
+            if (params != null) {
+                return null;
+            }
+            params = CurveParams.forKeyLength((short) 66);
+        }
+        return params;
+    }
+
     /**
      * Gets an elliptic curve private key object.
      *
@@ -7241,12 +7444,18 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                     case 0x0E:
                         CERTIFICATION_LEVEL = array[offset++];
                         break;
-                    case 0x0F:
-                        if (array[offset++] != 0x58 || array[offset++] != 0x20) {
+                    case 0x0F: {
+                        if (array[offset++] != 0x58) {
                             ISOException.throwIt(ISO7816.SW_DATA_INVALID);
                         }
-                        offset += loadAttestationPrivateKey(array, offset);
+                        short keyLen = ub(array[offset++]);
+                        CurveParams params = CurveParams.forKeyLength(keyLen);
+                        if (params == null) {
+                            ISOException.throwIt(ISO7816.SW_DATA_INVALID);
+                        }
+                        offset += loadAttestationPrivateKey(array, offset, params);
                         break;
+                    }
                     case 0x10:
                         WRITES_INVALIDATE_PINS = array[offset++] == (byte) 0xF5;
                         break;
@@ -7396,12 +7605,8 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
             sendErrorByte(apdu, FIDOConstants.CTAP2_ERR_NOT_ALLOWED);
         }
 
-        short minLength = (short)(aaguid.length + 4);
-        if (attestationKey == null) {
-            minLength += RESIDENT_KEY_CURVE_PARAMS.getKeyLength();
-        }
-
-        if (length <= minLength) {
+        short keyLength = findAttestationKeyLength(params, offset, length);
+        if (keyLength < 0) {
             if (apdu != null) {
                 sendErrorByte(apdu, FIDOConstants.CTAP1_ERR_INVALID_LENGTH);
             }
@@ -7411,19 +7616,36 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         JCSystem.beginTransaction();
         boolean success = false;
         try {
-            attestationSwitchingEnabled = false; // We're loading a cert here and now.
-
             Util.arrayCopy(params, offset, aaguid, (short) 0, (short) aaguid.length);
-            offset += (short) aaguid.length;
-            short amountToRead = (short)(length - aaguid.length - 2);
-
-            if (attestationKey == null) {
-                offset += loadAttestationPrivateKey(params, offset);
-                amountToRead -= RESIDENT_KEY_CURVE_PARAMS.getKeyLength();
+            final short baseOffset = (short) (offset + aaguid.length);
+            CurveParams attestationParams;
+            short workingOffset = baseOffset;
+            if (keyLength > 0) {
+                attestationParams = CurveParams.forKeyLength(keyLength);
+                if (attestationParams == null) {
+                    if (apdu != null) {
+                        sendErrorByte(apdu, FIDOConstants.CTAP1_ERR_INVALID_LENGTH);
+                    }
+                    throwException(ISO7816.SW_DATA_INVALID);
+                }
+                if (getAttestationKeyForAlg(attestationParams.getCoseAlgId()) == null) {
+                    workingOffset += loadAttestationPrivateKey(params, workingOffset, attestationParams);
+                } else {
+                    workingOffset += keyLength;
+                }
+            } else {
+                attestationParams = resolveAttestationParamsForCertOnly();
+                if (attestationParams == null || getAttestationKeyForAlg(attestationParams.getCoseAlgId()) == null) {
+                    if (apdu != null) {
+                        sendErrorByte(apdu, FIDOConstants.CTAP1_ERR_INVALID_LENGTH);
+                    }
+                    throwException(ISO7816.SW_DATA_INVALID);
+                }
             }
 
-            final short expectedLength = Util.getShort(params, offset);
-            offset += 2;
+            final short expectedLength = Util.getShort(params, workingOffset);
+            workingOffset += 2;
+            short amountToRead = (short)(length - (workingOffset - offset));
 
             if (amountToRead > expectedLength) {
                 if (apdu != null) {
@@ -7432,18 +7654,20 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                 throwException(ISO7816.SW_DATA_INVALID);
             }
 
-            if ((params[offset] & 0xF0) != 0x80) {
+            if (!isValidAttestationCbor(params, workingOffset)) {
                 // These bytes should/must be a CBOR array
                 // it's doubtful trying to use >15 certificates is a good idea, either
                 throwException(ISO7816.SW_DATA_INVALID);
             }
 
+            attestationLoadParams = attestationParams;
             attestationData = new byte[expectedLength];
             filledAttestationData = amountToRead;
-            Util.arrayCopy(params, offset,
+            Util.arrayCopy(params, workingOffset,
                     attestationData, (short) 0, amountToRead);
 
             if (filledAttestationData == attestationData.length) {
+                finalizeAttestationLoad();
                 // Done!
                 if (apdu != null) {
                     final byte[] buffer = apdu.getBuffer();
@@ -7466,11 +7690,12 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
         return false;
     }
 
-    private short loadAttestationPrivateKey(byte[] params, short offset) {
-        attestationKey = getECPrivKey(false, false);
-        P256Constants.setCurve(attestationKey);
-        attestationKey.setS(params, offset, RESIDENT_KEY_CURVE_PARAMS.getKeyLength());
-        return RESIDENT_KEY_CURVE_PARAMS.getKeyLength();
+    private short loadAttestationPrivateKey(byte[] params, short offset, CurveParams curveParams) {
+        ECPrivateKey attestationKey = getECPrivKey(false, false, getKeyBuilderLength(curveParams));
+        applyCurveParams(curveParams, attestationKey, null);
+        attestationKey.setS(params, offset, curveParams.getKeyLength());
+        storeAttestationKey(curveParams, attestationKey);
+        return curveParams.getKeyLength();
     }
 
     /**
@@ -7499,8 +7724,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
             filledAttestationData += lc;
             done = filledAttestationData == attestationData.length;
             if (done) {
-                // Loaded up, ready to go, locked
-                attestationSwitchingEnabled = false;
+                finalizeAttestationLoad();
             }
             ok = true;
         } finally {
