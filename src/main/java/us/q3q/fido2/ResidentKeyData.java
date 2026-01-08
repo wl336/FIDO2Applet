@@ -395,9 +395,18 @@ public class ResidentKeyData {
      * @param targetBuffer Buffer into which to store the LBK
      * @param targetOffset Offset at which to store the LBK
      */
-    public void emitLargeBlobKey(AESKey key, Cipher wrapper, byte[] targetBuffer, short targetOffset) {
+    public void emitLargeBlobKey(AESKey key, Cipher wrapper, javacard.security.MessageDigest sha256,
+                                 byte[] scratchBuffer, short scratchOffset,
+                                 byte[] targetBuffer, short targetOffset) {
         wrapper.init(key, Cipher.MODE_ENCRYPT, IVs, LARGE_BLOB_IV_OFFSET, IV_LEN);
-        wrapper.doFinal(publicKey, (short) 0, (short) 32,
+        if (keyLength == 32) {
+            wrapper.doFinal(publicKey, (short) 0, (short) 32,
+                    targetBuffer, targetOffset);
+            return;
+        }
+        sha256.doFinal(publicKey, (short) 0, publicKeyLength,
+                scratchBuffer, scratchOffset);
+        wrapper.doFinal(scratchBuffer, scratchOffset, (short) 32,
                 targetBuffer, targetOffset);
     }
 
