@@ -89,6 +89,22 @@ public class ResidentKeyData {
      */
     private final byte[] publicKey;
     /**
+     * Length of the public key data stored with this RK
+     */
+    private final short publicKeyLength;
+    /**
+     * Length of the public key's X/Y components
+     */
+    private final short keyLength;
+    /**
+     * COSE curve identifier used for this RK
+     */
+    private final short coseCurveId;
+    /**
+     * COSE algorithm identifier used for this RK
+     */
+    private final short coseAlgId;
+    /**
      * Encrypted (with the device wrapping key) credBlobs for resident keys
      */
     private final byte[] credBlob;
@@ -142,6 +158,11 @@ public class ResidentKeyData {
         publicKey = new byte[publicKeyLength];
         Util.arrayCopyNonAtomic(publicKeyBuffer, publicKeyOffset,
                 publicKey, (short) 0, publicKeyLength);
+
+        this.publicKeyLength = publicKeyLength;
+        this.keyLength = (short)(publicKeyLength / 2);
+        this.coseCurveId = curveParams.getCoseCurveId();
+        this.coseAlgId = curveParams.getCoseAlgId();
 
         this.uniqueRP = uniqueRP;
         this.curveParams = curveParams;
@@ -296,6 +317,42 @@ public class ResidentKeyData {
     public void unpackPublicKey(byte[] targetBuffer, short targetOffset) {
         Util.arrayCopyNonAtomic(publicKey, (short) 0,
                 targetBuffer, targetOffset, (short) publicKey.length);
+    }
+
+    /**
+     * Get the length of the stored public key.
+     *
+     * @return Length in bytes.
+     */
+    public short getPublicKeyLength() {
+        return publicKeyLength;
+    }
+
+    /**
+     * Get the length of a public key coordinate.
+     *
+     * @return Length in bytes.
+     */
+    public short getKeyLength() {
+        return keyLength;
+    }
+
+    /**
+     * Get the COSE curve identifier for this RK.
+     *
+     * @return COSE curve ID.
+     */
+    public short getCoseCurveId() {
+        return coseCurveId;
+    }
+
+    /**
+     * Get the COSE algorithm identifier for this RK.
+     *
+     * @return COSE alg ID.
+     */
+    public short getCoseAlgId() {
+        return coseAlgId;
     }
 
     /**
