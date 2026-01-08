@@ -1699,7 +1699,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                 outBuf, writeIdx, params.getCredentialIdLength());
 
         // Public key
-        writeIdx = writePublicKeyPreamble(outBuf, writeIdx, params);
+        writeIdx = writeCosePublicKeyHeader(outBuf, writeIdx, params);
         writeIdx = writePubKey(outBuf, writeIdx, pubKeyBuffer, pubKeyOffset, params);
 
         short numExtensions = 0;
@@ -1923,7 +1923,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                 params.getCredentialIdLength() + // credential ID
                 getPublicKeyPreambleLength(params) + // public key CBOR preamble bytes
                 params.getKeyLength() + // x-point
-                3 + // CBOR bytes to introduce the y-point
+                1 + getCborByteStringLengthSize(params.getKeyLength()) + // CBOR bytes to introduce the y-point
                 params.getKeyLength() + // y-point
                 (useCredProtect || useHmacSecret || useCredBlob ? 1 : 0) + // extension data intro
                 (useHmacSecret ? 2 + CannedCBOR.HMAC_SECRET_EXTENSION_ID.length : 0) + // extension data
@@ -2685,7 +2685,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                 + 1 + getCborByteStringLengthSize(params.getKeyLength())); // x byte string length
     }
 
-    private short writePublicKeyPreamble(byte[] outBuf, short writeIdx, CurveParams params) {
+    private short writeCosePublicKeyHeader(byte[] outBuf, short writeIdx, CurveParams params) {
         outBuf[writeIdx++] = (byte) 0xA5; // map: five entries
         outBuf[writeIdx++] = 0x01; // map key: kty
         writeIdx = encodeCborIntTo(outBuf, writeIdx, (short) 2); // EC2
@@ -5286,7 +5286,7 @@ public final class FIDO2Applet extends Applet implements ExtendedLength {
                         residentKeys[rkIndex].getCurveParams(), outBuf, writeOffset);
 
                 outBuf[writeOffset++] = 0x08; // map key: publicKey
-                writeOffset = writePublicKeyPreamble(outBuf, writeOffset, residentKeys[rkIndex].getCurveParams());
+                writeOffset = writeCosePublicKeyHeader(outBuf, writeOffset, residentKeys[rkIndex].getCurveParams());
 
                 short pkBufHandle = bufferManager.allocate(apdu, residentKeys[rkIndex].getCurveParams().getPubKeyLength(),
                         BufferManager.ANYWHERE);
